@@ -838,10 +838,10 @@ function initMsal() {
     auth: { clientId: MS_CLIENT_ID, authority: `https://login.microsoftonline.com/${MS_TENANT_ID}`, redirectUri },
     cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
   });
-  msalApp.handleRedirectPromise().then(async () => {
+  msalApp.handleRedirectPromise().then(async (result) => {
     updateMsBtn();
     updateSyncBannerBtn();
-    if (getMsalAccount()) {
+    if (result || getMsalAccount()) {
       setSaveStatus('⏳ OneDrive...', '#fff176');
       await loadFromGraph();
     }
@@ -884,17 +884,11 @@ async function toggleMsLogin() {
   const acc = getMsalAccount();
   if (acc) {
     if (!confirm(`${acc.name || acc.username} abmelden?`)) return;
-    try { await msalApp.logoutPopup({ account: acc }); } catch(e) {}
-    updateMsBtn();
-    setSaveStatus('⚪ nicht verknüpft', 'rgba(255,255,255,.45)');
-    updateSyncBannerBtn();
-    showSyncBanner();
+    try { await msalApp.logoutRedirect({ account: acc, postLogoutRedirectUri: window.location.href }); } catch(e) {}
   } else {
     try {
       setSaveStatus('⏳ Anmeldung...', '#fff176');
-      await msalApp.loginPopup({ scopes: ['Files.ReadWrite'] });
-      updateMsBtn();
-      await loadFromGraph();
+      await msalApp.loginRedirect({ scopes: ['Files.ReadWrite'] });
     } catch(e) {
       if (e.errorCode !== 'user_cancelled') console.error('MSAL login:', e);
       setSaveStatus('⚪ nicht verknüpft', 'rgba(255,255,255,.45)');
@@ -909,8 +903,8 @@ async function getToken() {
     const r = await msalApp.acquireTokenSilent({ scopes: ['Files.ReadWrite'], account: acc });
     return r.accessToken;
   } catch {
-    const r = await msalApp.acquireTokenPopup({ scopes: ['Files.ReadWrite'], account: getMsalAccount() });
-    return r.accessToken;
+    await msalApp.acquireTokenRedirect({ scopes: ['Files.ReadWrite'], account: getMsalAccount() });
+    throw new Error('Token-Redirect gestartet');
   }
 }
 
