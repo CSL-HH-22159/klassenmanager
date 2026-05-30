@@ -64,6 +64,7 @@ tbody tr:hover .col-name{background:#fafafa}
 .s-Q{background:#fff9c4;color:#e65100}
 .s-U{background:#ffcdd2;color:#b71c1c}
 .s-F{background:#eeeeee;color:#9e9e9e;text-decoration:line-through}
+.s-V{background:#ede7f6;color:#4527a0}
 
 .popup{position:fixed;z-index:500;background:#fff;border:1px solid #ddd;border-radius:8px;padding:6px;box-shadow:0 6px 20px rgba(0,0,0,.18);display:flex;flex-direction:column;gap:4px;min-width:148px}
 .popup button{text-align:left;padding:5px 10px;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600}
@@ -152,7 +153,7 @@ tbody tr:hover .col-name{background:#fafafa}
   <div id="tab-muendlich" class="tab-panel">
     <div class="toolbar">
       <h3>Mündliche Mitarbeit</h3>
-      <span style="font-size:12px;color:#888">Smiley anklicken = Note vergeben / erneut anklicken = löschen</span>
+      <span id="mu-hint" style="font-size:12px;color:#888">Smiley anklicken = Note vergeben / erneut anklicken = löschen</span>
     </div>
     <div id="mu-wrap" class="tbl-wrap"></div>
   </div>
@@ -188,12 +189,32 @@ const SM_LABELS = ['Ungenügend (6)','Mangelhaft (5)','Ausreichend (4)','Befried
 const SM_GRADES = [6, 5, 4, 3, 2, 1];
 const SM_COLORS = ['#880e4f','#c62828','#e65100','#f9a825','#388e3c','#1b5e20'];
 
+// Oberstufe (Klassen 11/12): Punkte 0–15
+const OB_THRESHOLDS = [95,90,85,80,75,70,65,60,55,50,45,40,33,27,20]; // Punkte 15→1
+function isOberstufe(name) { return /^1[12]/i.test(name||''); }
+function ptsToNoteStr(p) {
+  const notes = ['6','5-','5','5+','4-','4','4+','3-','3','3+','2-','2','2+','1-','1','1+'];
+  p = Math.max(0, Math.min(15, Math.round(p)));
+  return notes[p];
+}
+function ptsColorCls(p) {
+  p = Math.round(p);
+  if (p >= 13) return 'g1'; if (p >= 10) return 'g2'; if (p >= 7) return 'g3';
+  if (p >= 4) return 'g4'; if (p >= 1) return 'g5'; return 'g6';
+}
+function pctToPts(pct, ns) {
+  const t = (Array.isArray(ns) && ns.length === 15) ? ns : OB_THRESHOLDS;
+  for (let i = 0; i < t.length; i++) { if (pct >= t[i]) return 15 - i; }
+  return 0;
+}
+
 const STATUS_CFG = {
   A: {label:'A',    title:'Anwesend',           cls:'s-A'},
   E: {label:'E',    title:'Entschuldigt',        cls:'s-E'},
   Q: {label:'?',    title:'Offen (nicht entsch.)',cls:'s-Q'},
   U: {label:'U',    title:'Unentschuldigt',      cls:'s-U'},
   F: {label:'—',    title:'Unterrichtsausfall',  cls:'s-F'},
+  V: {label:'V',    title:'Verspätet',           cls:'s-V'},
   '': {label:'–',   title:'Nicht eingetragen',   cls:'s-none'},
 };
 
@@ -357,10 +378,10 @@ function renderAnwesenheit(k) {
   // Summenzeile
   h += '<tr style="background:#f5f5f5;font-weight:600"><td class="col-name" style="background:#f5f5f5">∑ Klasse</td>';
   sorted.forEach(t => {
-    const cnt = {A:0,E:0,Q:0,U:0,F:0};
+    const cnt = {A:0,E:0,Q:0,U:0,F:0,V:0};
     k.schueler.forEach((s,si) => { const st=(k.anwesenheit[si]||{})[t.datum]; if(st)cnt[st]++; });
     h += `<td style="text-align:center;font-size:11px;line-height:1.8">
-      <span style="color:#1b5e20">${cnt.A}×A</span> <span style="color:#0d47a1">${cnt.E}×E</span> <span style="color:#b71c1c">${cnt.U}×U</span>
+      <span style="color:#1b5e20">${cnt.A}×A</span> <span style="color:#0d47a1">${cnt.E}×E</span> <span style="color:#b71c1c">${cnt.U}×U</span>${cnt.V ? ` <span style="color:#4527a0">${cnt.V}×V</span>` : ''}
     </td>`;
   });
   h += '<td></td></tr></tbody></table>';
@@ -382,6 +403,7 @@ function showStatusPopup(ev, si, datum) {
     {st:'E', label:'E  Entschuldigt',       cls:'s-E'},
     {st:'Q', label:'?  Offen',              cls:'s-Q'},
     {st:'U', label:'U  Unentschuldigt',     cls:'s-U'},
+    {st:'V', label:'V  Verspätet',           cls:'s-V'},
     {st:'F', label:'—  Unterrichtsausfall', cls:'s-F'},
     {st:'',  label:'×  Leer',              cls:'s-none'},
   ].forEach(o => {
@@ -452,31 +474,52 @@ function renderMuendlich(k) {
   if (!k.schueler.length) { wrap.innerHTML = emptyHtml('Keine Schüler'); return; }
   if (!k.termine.length)  { wrap.innerHTML = emptyHtml('Keine Termine', 'Unterrichtstermine über "+ Termin" im Anwesenheit-Tab hinzufügen.'); return; }
 
+  const ob = isOberstufe(k.name);
+  const hint = document.getElementById('mu-hint');
+  if (hint) hint.textContent = ob
+    ? 'Zelle anklicken = Punkte (0–15) vergeben / erneut anklicken = löschen'
+    : 'Smiley anklicken = Note vergeben / erneut anklicken = löschen';
+
   const sorted = [...k.termine].sort((a,b) => a.datum.localeCompare(b.datum));
+  const colW = ob ? '60px' : '144px';
   let h = '<table><thead><tr><th class="col-name">Name</th>';
   sorted.forEach(t => {
-    h += `<th style="min-width:144px"><div>${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
+    h += `<th style="min-width:${colW}"><div>${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
   });
-  h += '<th style="min-width:70px;text-align:center">Ø Note</th></tr></thead><tbody>';
+  h += `<th style="min-width:80px;text-align:center">Ø ${ob ? 'Punkte' : 'Note'}</th></tr></thead><tbody>`;
 
   k.schueler.forEach((s, si) => {
     h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let sum = 0, cnt = 0;
     sorted.forEach(t => {
       const r = (k.muendlich[si] || {})[t.datum];
-      const smRow = SMILEYS.map((em, idx) => {
-        const on = r === idx;
-        return `<span class="sm ${on?'on':''}" title="${SM_LABELS[idx]}"
-          style="${on ? `border-color:${SM_COLORS[idx]};background:${SM_COLORS[idx]}22` : ''}"
-          onclick="toggleMuendlich(${si},'${t.datum}',${idx})">${em}</span>`;
-      }).join('');
-      h += `<td class="cell-sm"><div class="smrow">${smRow}</div></td>`;
-      if (r !== undefined && r !== null) { sum += SM_GRADES[r]; cnt++; }
+      if (ob) {
+        const hasVal = r !== undefined && r !== null;
+        const cc = hasVal ? ptsColorCls(r) : '';
+        h += `<td class="cell-st" onclick="showObPopup(event,${si},'${t.datum}')">
+          <span class="${cc}" style="font-size:1.1rem;font-weight:700;display:block;text-align:center;cursor:pointer">${hasVal ? r : '—'}</span>
+        </td>`;
+        if (hasVal) { sum += r; cnt++; }
+      } else {
+        const smRow = SMILEYS.map((em, idx) => {
+          const on = r === idx;
+          return `<span class="sm ${on?'on':''}" title="${SM_LABELS[idx]}"
+            style="${on ? `border-color:${SM_COLORS[idx]};background:${SM_COLORS[idx]}22` : ''}"
+            onclick="toggleMuendlich(${si},'${t.datum}',${idx})">${em}</span>`;
+        }).join('');
+        h += `<td class="cell-sm"><div class="smrow">${smRow}</div></td>`;
+        if (r !== undefined && r !== null) { sum += SM_GRADES[r]; cnt++; }
+      }
     });
     if (cnt > 0) {
       const avg = sum / cnt;
-      const gi  = Math.min(6, Math.max(1, Math.round(avg)));
-      h += `<td style="text-align:center"><span class="g${gi}" style="font-size:1.1rem">${avg.toFixed(1)}</span></td>`;
+      if (ob) {
+        const p = Math.round(avg);
+        h += `<td style="text-align:center"><span class="${ptsColorCls(p)}" style="font-size:1.1rem">${avg.toFixed(1)}<br><small style="font-size:10px">${ptsToNoteStr(p)}</small></span></td>`;
+      } else {
+        const gi = Math.min(6, Math.max(1, Math.round(avg)));
+        h += `<td style="text-align:center"><span class="g${gi}" style="font-size:1.1rem">${avg.toFixed(1)}</span></td>`;
+      }
     } else {
       h += '<td style="text-align:center;color:#bbb">—</td>';
     }
@@ -495,15 +538,60 @@ function toggleMuendlich(si, datum, idx) {
   save(); renderMuendlich(k);
 }
 
+function showObPopup(ev, si, datum) {
+  ev.stopPropagation();
+  closePopup();
+  const k = cls(); if (!k) return;
+  const current = (k.muendlich[si] || {})[datum];
+  const p = document.createElement('div');
+  p.className = 'popup';
+  p.style.minWidth = '188px';
+  p.style.padding = '6px';
+  const r = ev.currentTarget.getBoundingClientRect();
+  p.style.top  = Math.min(r.bottom + 4, window.innerHeight - 260) + 'px';
+  p.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 200)) + 'px';
+
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:3px';
+  for (let i = 15; i >= 0; i--) {
+    const b = document.createElement('button');
+    b.innerHTML = `<strong>${i}</strong><br><span style="font-size:9px">${ptsToNoteStr(i)}</span>`;
+    b.style.cssText = `padding:4px 0;border-radius:4px;border:2px solid ${current===i?'#1a237e':'#e0e0e0'};background:#fff;cursor:pointer;font-size:11px;line-height:1.2;text-align:center`;
+    b.className = ptsColorCls(i);
+    const pts = i;
+    b.onclick = ev2 => {
+      ev2.stopPropagation();
+      const k2 = cls(); if (!k2.muendlich[si]) k2.muendlich[si] = {};
+      if (current === pts) delete k2.muendlich[si][datum];
+      else k2.muendlich[si][datum] = pts;
+      save(); renderMuendlich(cls()); closePopup();
+    };
+    grid.appendChild(b);
+  }
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = '× leer';
+  clearBtn.style.cssText = 'grid-column:span 4;padding:4px;border:none;border-radius:4px;background:#f5f5f5;color:#999;cursor:pointer;font-size:11px;margin-top:3px;width:100%';
+  clearBtn.onclick = ev2 => {
+    ev2.stopPropagation();
+    const k2 = cls(); if (k2.muendlich[si]) delete k2.muendlich[si][datum];
+    save(); renderMuendlich(cls()); closePopup();
+  };
+  p.appendChild(grid);
+  p.appendChild(clearBtn);
+  document.body.appendChild(p);
+  _popup = p;
+  setTimeout(() => document.addEventListener('click', closePopup, {once:true}), 0);
+}
+
 // ══════════════════════════════════════════
 // NOTEN
 // ══════════════════════════════════════════
 function muendlichAvgGrade(si) {
   const k = cls(); if (!k) return null;
-  const ratings = Object.values(k.muendlich[si] || {});
-  if (!ratings.length) return null;
-  const grades = ratings.map(r => SM_GRADES[r]);
-  return grades.reduce((a,b)=>a+b,0) / grades.length;
+  const entries = Object.values(k.muendlich[si] || {});
+  if (!entries.length) return null;
+  const vals = isOberstufe(k.name) ? entries : entries.map(r => SM_GRADES[r]);
+  return vals.reduce((a,b)=>a+b,0) / vals.length;
 }
 
 function arbeitGrade(arb, si) {
@@ -513,6 +601,10 @@ function arbeitGrade(arb, si) {
   if (!maxTotal) return null;
   const earned = ergs.reduce((s,p) => s+(parseFloat(p)||0), 0);
   const pct = earned / maxTotal * 100;
+  const k = cls();
+  if (isOberstufe(k ? k.name : '')) {
+    return pctToPts(pct, arb.notenschluessel);
+  }
   const ns = Array.isArray(arb.notenschluessel) ? arb.notenschluessel : [90,75,60,45,30];
   for (let i = 0; i < ns.length; i++) { if (pct >= ns[i]) return i + 1; }
   return 6;
@@ -530,9 +622,15 @@ function renderNoten(k) {
   k.arbeiten.forEach(a => h += `<th>${esc(a.name)}</th>`);
   h += '<th>Gesamtnote</th></tr></thead><tbody>';
 
-  const fmtG = g => g !== null
-    ? `<span class="g${Math.min(6,Math.max(1,Math.round(g)))}">${typeof g === 'number' ? g.toFixed(1) : g}</span>`
-    : '<span style="color:#bbb">—</span>';
+  const ob = isOberstufe(k.name);
+  const fmtG = g => {
+    if (g === null) return '<span style="color:#bbb">—</span>';
+    if (ob) {
+      const p = Math.round(g);
+      return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <small>(${ptsToNoteStr(p)})</small></span>`;
+    }
+    return `<span class="g${Math.min(6,Math.max(1,Math.round(g)))}">${typeof g === 'number' ? g.toFixed(1) : g}</span>`;
+  };
 
   k.schueler.forEach((s, si) => {
     const mAvg   = muendlichAvgGrade(si);
@@ -561,12 +659,13 @@ function renderNoten(k) {
 // ══════════════════════════════════════════
 function addArbeit() {
   const k = cls(); if (!k) { alert('Bitte zuerst eine Klasse wählen.'); return; }
+  const ob = isOberstufe(k.name);
   k.arbeiten.push({
-    name: `Arbeit ${k.arbeiten.length + 1}`,
+    name: ob ? `Klausur ${k.arbeiten.length + 1}` : `Arbeit ${k.arbeiten.length + 1}`,
     datum: new Date().toISOString().slice(0,10),
     aufgaben: [{name:'A1', punkte:10}],
     ergebnisse: {},
-    notenschluessel: [90, 75, 60, 45, 30]
+    notenschluessel: ob ? [...OB_THRESHOLDS] : [90, 75, 60, 45, 30]
   });
   state.curArbeit = k.arbeiten.length - 1;
   save(); renderArbeiten(k); renderNoten(k);
@@ -597,14 +696,30 @@ function renderArbeiten(k) {
   if (!arb) { body.innerHTML = ''; return; }
 
   const maxTotal = arb.aufgaben.reduce((s,a) => s+(parseFloat(a.punkte)||0), 0);
-  const ns = Array.isArray(arb.notenschluessel) ? arb.notenschluessel : [90,75,60,45,30];
+  const ob = isOberstufe(k.name);
+  const expectedLen = ob ? 15 : 5;
+  const ns = (Array.isArray(arb.notenschluessel) && arb.notenschluessel.length === expectedLen)
+    ? arb.notenschluessel
+    : ob ? [...OB_THRESHOLDS] : [90,75,60,45,30];
 
-  const nsBar = ns.map((th, i) =>
-    `<span class="g${i+1}" style="display:flex;align-items:center;gap:3px">
-      Note ${i+1} ab <input class="ns-inp" type="number" min="0" max="100" value="${th}"
-        onchange="updateNS(${ai},${i},this.value)">%
-    </span>`
-  ).join('');
+  let nsBar;
+  if (ob) {
+    nsBar = `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;width:100%">`
+      + ns.map((th, i) => {
+          const pts = 15 - i;
+          return `<span class="${ptsColorCls(pts)}" style="display:flex;align-items:center;gap:2px;font-size:11px;white-space:nowrap">
+            <b>${pts}</b>P ab<input class="ns-inp" type="number" min="0" max="100" value="${th}" onchange="updateNS(${ai},${i},this.value)">%
+          </span>`;
+        }).join('')
+      + `</div>`;
+  } else {
+    nsBar = ns.map((th, i) =>
+      `<span class="g${i+1}" style="display:flex;align-items:center;gap:3px">
+        Note ${i+1} ab <input class="ns-inp" type="number" min="0" max="100" value="${th}"
+          onchange="updateNS(${ai},${i},this.value)">%
+      </span>`
+    ).join('');
+  }
 
   let h = `<div class="card">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
@@ -645,9 +760,13 @@ function renderArbeiten(k) {
     });
     const pct = maxTotal ? (earned/maxTotal*100).toFixed(1) : '—';
     const g   = arbeitGrade(arb, si);
+    const gHtml = g !== null
+      ? (ob ? `<span class="${ptsColorCls(g)}" style="font-size:1.1rem">${g}<br><small style="font-size:10px">${ptsToNoteStr(g)}</small></span>`
+            : `<span class="g${g}" style="font-size:1.1rem">${g}</span>`)
+      : '—';
     h += `<td></td>
       <td style="text-align:center;font-size:12px" id="tot-${ai}-${si}">${earned}/${maxTotal}<br><span style="color:#888">${pct}%</span></td>
-      <td style="text-align:center" id="grd-${ai}-${si}">${g ? `<span class="g${g}" style="font-size:1.1rem">${g}</span>` : '—'}</td>
+      <td style="text-align:center" id="grd-${ai}-${si}">${gHtml}</td>
     </tr>`;
   });
 
@@ -661,7 +780,8 @@ function renderArbeiten(k) {
     },0) / k.schueler.length;
     h += `<td style="text-align:center;color:#555">${colAvg.toFixed(1)}</td>`;
   });
-  h += `<td></td><td style="text-align:center"></td><td style="text-align:center">⌀ ${avgG}</td></tr>`;
+  const avgLabel = (ob && avgG !== '—') ? ` (${ptsToNoteStr(parseFloat(avgG))})` : '';
+  h += `<td></td><td style="text-align:center"></td><td style="text-align:center">⌀ ${avgG}${avgLabel}</td></tr>`;
   h += '</tbody></table></div></div>';
   body.innerHTML = h;
 }
@@ -680,8 +800,12 @@ function setErgebnis(ai, si, oi, val) {
   const g     = arbeitGrade(arb, si);
   const tc = document.getElementById(`tot-${ai}-${si}`);
   const gc = document.getElementById(`grd-${ai}-${si}`);
+  const ob2 = isOberstufe(k ? k.name : '');
   if (tc) tc.innerHTML = `${earn}/${maxT}<br><span style="color:#888">${pct}%</span>`;
-  if (gc) gc.innerHTML = g ? `<span class="g${g}" style="font-size:1.1rem">${g}</span>` : '—';
+  if (gc) gc.innerHTML = g !== null
+    ? (ob2 ? `<span class="${ptsColorCls(g)}" style="font-size:1.1rem">${g}<br><small style="font-size:10px">${ptsToNoteStr(g)}</small></span>`
+           : `<span class="g${g}" style="font-size:1.1rem">${g}</span>`)
+    : '—';
   renderNoten(k);
 }
 
@@ -712,7 +836,15 @@ function arbRename(ai, v)        { const k=cls();if(!k)return;k.arbeiten[ai].nam
 function arbSetDate(ai, v)       { const k=cls();if(!k)return;k.arbeiten[ai].datum=v;save(); }
 function arbAufgName(ai,oi,v)    { const k=cls();if(!k)return;k.arbeiten[ai].aufgaben[oi].name=v;save(); }
 function arbAufgPunkte(ai,oi,v)  { const k=cls();if(!k)return;k.arbeiten[ai].aufgaben[oi].punkte=parseFloat(v)||0;save();renderArbeiten(k);renderNoten(k); }
-function updateNS(ai, idx, v)    { const k=cls();if(!k)return;if(!Array.isArray(k.arbeiten[ai].notenschluessel))k.arbeiten[ai].notenschluessel=[90,75,60,45,30];k.arbeiten[ai].notenschluessel[idx]=parseFloat(v)||0;save();renderArbeiten(k);renderNoten(k); }
+function updateNS(ai, idx, v) {
+  const k=cls();if(!k)return;
+  const arb=k.arbeiten[ai];
+  const ob=isOberstufe(k.name);
+  if(!Array.isArray(arb.notenschluessel)||arb.notenschluessel.length!==(ob?15:5))
+    arb.notenschluessel = ob ? [...OB_THRESHOLDS] : [90,75,60,45,30];
+  arb.notenschluessel[idx]=parseFloat(v)||0;
+  save();renderArbeiten(k);renderNoten(k);
+}
 
 // ══════════════════════════════════════════
 // MODALS
@@ -1118,11 +1250,17 @@ function exportExcel() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([anwHead,...anwRows]), 'Anwesenheit');
 
   // Mündlich
-  const muHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), 'Ø Note'];
+  const obEx = isOberstufe(k.name);
+  const muHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
   const muRows = k.schueler.map((s,si) => {
-    const cells = sorted.map(t => { const r=(k.muendlich[si]||{})[t.datum]; return r!==undefined?SM_LABELS[r]:''; });
+    const cells = sorted.map(t => {
+      const r=(k.muendlich[si]||{})[t.datum];
+      if (r===undefined) return '';
+      return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
+    });
     const avg   = muendlichAvgGrade(si);
-    return [`${s.nachname}, ${s.vorname}`, ...cells, avg!==null?avg.toFixed(1):''];
+    const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
+    return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([muHead,...muRows]), 'Mündliche Mitarbeit');
 
