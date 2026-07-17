@@ -128,9 +128,10 @@ tbody tr:hover .col-name{background:#fafafa}
 
 <nav>
   <button class="active" data-tab="anwesenheit" onclick="switchTab(this)">Anwesenheit</button>
-  <button data-tab="muendlich" onclick="switchTab(this)">Mündliche Mitarbeit</button>
+  <button data-tab="muendlich" onclick="switchTab(this)">Mitarbeit</button>
   <button data-tab="noten" onclick="switchTab(this)">Notenübersicht</button>
   <button data-tab="arbeiten" onclick="switchTab(this)">Klassenarbeiten</button>
+  <button data-tab="gruppen" onclick="switchTab(this)">Gruppen</button>
 </nav>
 
 <div id="sync-banner" style="display:none;background:#fff8e1;border-bottom:1px solid #ffe082;padding:8px 20px;font-size:13px;color:#5d4037;display:flex;align-items:center;gap:12px">
@@ -144,16 +145,22 @@ tbody tr:hover .col-name{background:#fafafa}
   <div id="tab-anwesenheit" class="tab-panel active">
     <div class="toolbar">
       <h3>Anwesenheit</h3>
+      <button id="anw-selbtn" class="btn btn-gray" onclick="toggleAnwSelMode()">☑ Mehrfachauswahl</button>
       <button class="btn btn-blue" onclick="openAddSchuelerModal()">+ Schüler</button>
       <button class="btn btn-green" onclick="openAddTerminModal()">+ Termin</button>
+    </div>
+    <div id="anw-selbar" style="display:none;background:#e8eaf6;border-radius:6px;padding:6px 12px;margin-bottom:8px;align-items:center;gap:10px;font-size:12.5px">
+      <span id="anw-selcount">0 ausgewählt</span>
+      <button class="btn btn-sm btn-blue" onclick="showBulkStatusPopup(event)">Status setzen</button>
+      <button class="btn btn-sm btn-gray" onclick="clearAnwSel()">Auswahl aufheben</button>
     </div>
     <div id="anw-wrap" class="tbl-wrap"></div>
   </div>
 
   <div id="tab-muendlich" class="tab-panel">
     <div class="toolbar">
-      <h3>Mündliche Mitarbeit</h3>
-      <span id="mu-hint" style="font-size:12px;color:#888">Smiley anklicken = Note vergeben / erneut anklicken = löschen</span>
+      <h3>Mitarbeit (Mündlich &amp; Kursarbeit)</h3>
+      <span id="mu-hint" style="font-size:12px;color:#888">Smiley anklicken = Note vergeben / erneut anklicken = löschen · oben Mündlich (M), unten Kursarbeit (K)</span>
     </div>
     <div id="mu-wrap" class="tbl-wrap"></div>
   </div>
@@ -163,6 +170,7 @@ tbody tr:hover .col-name{background:#fafafa}
       <h3>Notenübersicht</h3>
       <button class="btn btn-gray" onclick="openGewichtungModal()">⚙ Gewichtung</button>
     </div>
+    <div id="no-pills" class="arbeit-pills"></div>
     <div id="no-wrap" class="tbl-wrap"></div>
   </div>
 
@@ -173,6 +181,13 @@ tbody tr:hover .col-name{background:#fafafa}
     </div>
     <div id="arbeit-pills" class="arbeit-pills"></div>
     <div id="arbeit-body"></div>
+  </div>
+
+  <div id="tab-gruppen" class="tab-panel">
+    <div class="toolbar">
+      <h3>Gruppenarbeitsgenerator</h3>
+    </div>
+    <div id="gr-wrap"></div>
   </div>
 </main>
 
@@ -191,6 +206,7 @@ const SM_COLORS = ['#880e4f','#c62828','#e65100','#f9a825','#388e3c','#1b5e20'];
 
 // Oberstufe (Klassen 11/12): Punkte 0–15
 const OB_THRESHOLDS = [95,90,85,80,75,70,65,60,55,50,45,40,33,27,20]; // Punkte 15→1
+const OB_SMILEY_PTS = [0, 2, 5, 8, 11, 14]; // Smiley-Index → Punkte (Oberstufe)
 function isOberstufe(name) { return /^1[12]/i.test(name||''); }
 function ptsToNoteStr(p) {
   const notes = ['6','5-','5','5+','4-','4','4+','3-','3','3+','2-','2','2+','1-','1','1+'];
@@ -222,6 +238,14 @@ const STATUS_CFG = {
 // STATE & PERSISTENZ
 // ══════════════════════════════════════════
 let state = { classes: {}, cur: null, curArbeit: 0 };
+
+// Anwesenheit: Mehrfachauswahl (nicht persistiert)
+let anwSelMode = false;
+let anwSel = new Set();
+
+// Gruppen: aktuelle Würfelung (nicht persistiert)
+let grState = { n: 4, datum: '', filterAbwesend: true };
+let grGroups = null;
 
 function loadState() {
   try { const s = localStorage.getItem('km_v3'); if (s) Object.assign(state, JSON.parse(s)); } catch(e) {}
@@ -262,7 +286,11 @@ function save() {
   if (getMsalAccount()) scheduleGraphSave();
   else writeToHandle();
 }
-function cls() { return state.cur ? state.classes[state.cur] : null; }
+function cls() {
+  const k = state.cur ? state.classes[state.cur] : null;
+  if (k && !k.kursarbeit) k.kursarbeit = {};
+  return k;
+}
 
 // ══════════════════════════════════════════
 // KLASSEN-VERWALTUNG
@@ -270,6 +298,8 @@ function cls() { return state.cur ? state.classes[state.cur] : null; }
 function switchClass(name) {
   state.cur = name || null;
   state.curArbeit = 0;
+  grGroups = null; grState.datum = '';
+  anwSelMode = false; anwSel.clear();
   save(); updateDropdown(); renderAll();
 }
 
@@ -281,6 +311,7 @@ function addNewClass(name, schueler, termine) {
     name, schueler, termine,
     anwesenheit: {},
     muendlich:   {},
+    kursarbeit:  {},
     arbeiten:    [],
     gewichtung:  { m: 40, a: 60 }
   };
@@ -316,6 +347,7 @@ function renderAll() {
   renderMuendlich(k);
   renderNoten(k);
   renderArbeiten(k);
+  renderGruppen(k);
 }
 
 function emptyHtml(msg, sub) {
@@ -367,9 +399,17 @@ function renderAnwesenheit(k) {
       const st = (k.anwesenheit[si] || {})[t.datum] || '';
       if (st === 'E' || st === 'Q' || st === 'U') fehlt++;
       const cfg = STATUS_CFG[st] || STATUS_CFG[''];
-      h += `<td class="cell-st" onclick="showStatusPopup(event,${si},'${t.datum}')">
-        <button class="sbtn ${cfg.cls}" title="${cfg.title}">${cfg.label}</button>
-      </td>`;
+      if (anwSelMode) {
+        const checked = anwSel.has(si + '|' + t.datum);
+        h += `<td class="cell-st" style="${checked?'background:#c5cae9':''}" onclick="toggleAnwCell(${si},'${t.datum}')">
+          <input type="checkbox" ${checked?'checked':''} style="pointer-events:none;vertical-align:middle;margin-right:3px">
+          <button class="sbtn ${cfg.cls}" title="${cfg.title}" style="pointer-events:none">${cfg.label}</button>
+        </td>`;
+      } else {
+        h += `<td class="cell-st" onclick="showStatusPopup(event,${si},'${t.datum}')">
+          <button class="sbtn ${cfg.cls}" title="${cfg.title}">${cfg.label}</button>
+        </td>`;
+      }
     });
     const fc = fehlt > 5 ? '#c62828' : fehlt > 2 ? '#e65100' : '#555';
     h += `<td style="text-align:center;font-weight:600;color:${fc}">${fehlt}</td></tr>`;
@@ -427,6 +467,82 @@ function setAnwesenheit(si, datum, status) {
   save(); renderAnwesenheit(k);
 }
 
+function toggleAnwSelMode() {
+  anwSelMode = !anwSelMode;
+  if (!anwSelMode) anwSel.clear();
+  const btn = document.getElementById('anw-selbtn');
+  if (btn) {
+    btn.textContent = anwSelMode ? '✕ Auswahl beenden' : '☑ Mehrfachauswahl';
+    btn.className = anwSelMode ? 'btn btn-blue' : 'btn btn-gray';
+  }
+  updateAnwSelBar();
+  renderAnwesenheit(cls());
+}
+
+function toggleAnwCell(si, datum) {
+  const key = si + '|' + datum;
+  if (anwSel.has(key)) anwSel.delete(key); else anwSel.add(key);
+  updateAnwSelBar();
+  renderAnwesenheit(cls());
+}
+
+function clearAnwSel() {
+  anwSel.clear();
+  updateAnwSelBar();
+  renderAnwesenheit(cls());
+}
+
+function updateAnwSelBar() {
+  const bar = document.getElementById('anw-selbar');
+  const cnt = document.getElementById('anw-selcount');
+  if (!bar || !cnt) return;
+  bar.style.display = anwSelMode ? 'flex' : 'none';
+  cnt.textContent = anwSel.size + ' ausgewählt';
+}
+
+function showBulkStatusPopup(ev) {
+  if (!anwSel.size) return;
+  closePopup();
+  const p = document.createElement('div');
+  p.className = 'popup';
+  const r = ev.currentTarget.getBoundingClientRect();
+  p.style.top  = Math.min(r.bottom + 4, window.innerHeight - 230) + 'px';
+  p.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 160)) + 'px';
+
+  [
+    {st:'A', label:'✓  Anwesend',          cls:'s-A'},
+    {st:'E', label:'E  Entschuldigt',       cls:'s-E'},
+    {st:'Q', label:'?  Offen',              cls:'s-Q'},
+    {st:'U', label:'U  Unentschuldigt',     cls:'s-U'},
+    {st:'V', label:'V  Verspätet',           cls:'s-V'},
+    {st:'F', label:'—  Unterrichtsausfall', cls:'s-F'},
+    {st:'',  label:'×  Leer',              cls:'s-none'},
+  ].forEach(o => {
+    const b = document.createElement('button');
+    b.className = o.cls; b.textContent = o.label;
+    b.onclick = ev2 => { ev2.stopPropagation(); applyBulkStatus(o.st); closePopup(); };
+    p.appendChild(b);
+  });
+
+  document.body.appendChild(p);
+  _popup = p;
+  setTimeout(() => document.addEventListener('click', closePopup, {once:true}), 0);
+}
+
+function applyBulkStatus(status) {
+  const k = cls(); if (!k) return;
+  anwSel.forEach(key => {
+    const idx = key.indexOf('|');
+    const si = parseInt(key.slice(0, idx));
+    const datum = key.slice(idx + 1);
+    if (!k.anwesenheit[si]) k.anwesenheit[si] = {};
+    if (status === '') delete k.anwesenheit[si][datum];
+    else k.anwesenheit[si][datum] = status;
+  });
+  anwSel.clear();
+  save(); updateAnwSelBar(); renderAnwesenheit(k);
+}
+
 function ausfallColumn(datum) {
   const k = cls(); if (!k) return;
   k.schueler.forEach((s, si) => {
@@ -449,7 +565,9 @@ function confirmDeleteSchueler(si) {
   }
   k.anwesenheit = shiftObj(k.anwesenheit);
   k.muendlich   = shiftObj(k.muendlich);
+  k.kursarbeit  = shiftObj(k.kursarbeit || {});
   k.arbeiten.forEach(arb => { arb.ergebnisse = shiftObj(arb.ergebnisse || {}); });
+  anwSel.clear();
   save(); renderAll();
 }
 
@@ -461,7 +579,9 @@ function confirmDeleteTermin(datum) {
   k.schueler.forEach((s,si) => {
     if (k.anwesenheit[si]) delete k.anwesenheit[si][datum];
     if (k.muendlich[si])   delete k.muendlich[si][datum];
+    if (k.kursarbeit[si])  delete k.kursarbeit[si][datum];
   });
+  anwSel.clear();
   save(); renderAll();
 }
 
@@ -476,40 +596,42 @@ function renderMuendlich(k) {
 
   const ob = isOberstufe(k.name);
   const hint = document.getElementById('mu-hint');
-  if (hint) hint.textContent = ob
-    ? 'Zelle anklicken = Punkte (0–15) vergeben / erneut anklicken = löschen'
-    : 'Smiley anklicken = Note vergeben / erneut anklicken = löschen';
+  if (hint) hint.textContent = 'Smiley anklicken = Note vergeben / erneut anklicken = löschen · oben Mündlich (M), unten Kursarbeit (K)';
 
   const sorted = [...k.termine].sort((a,b) => a.datum.localeCompare(b.datum));
-  const colW = ob ? '60px' : '144px';
   let h = '<table><thead><tr><th class="col-name">Name</th>';
   sorted.forEach(t => {
-    h += `<th style="min-width:${colW}"><div>${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
+    h += `<th style="min-width:150px"><div>${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
   });
   h += `<th style="min-width:80px;text-align:center">Ø ${ob ? 'Punkte' : 'Note'}</th></tr></thead><tbody>`;
+
+  function smileyRow(cat, si, datum, val) {
+    return SMILEYS.map((em, idx) => {
+      const on = ob ? val === OB_SMILEY_PTS[idx] : val === idx;
+      return `<span class="sm ${on?'on':''}" title="${SM_LABELS[idx]}"
+        style="${on ? `border-color:${SM_COLORS[idx]};background:${SM_COLORS[idx]}22` : ''}"
+        onclick="toggleMitarbeit('${cat}',${si},'${datum}',${idx})">${em}</span>`;
+    }).join('');
+  }
 
   k.schueler.forEach((s, si) => {
     h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let sum = 0, cnt = 0;
     sorted.forEach(t => {
-      const r = (k.muendlich[si] || {})[t.datum];
-      if (ob) {
-        const hasVal = r !== undefined && r !== null;
-        const cc = hasVal ? ptsColorCls(r) : '';
-        h += `<td class="cell-st" onclick="showObPopup(event,${si},'${t.datum}')">
-          <span class="${cc}" style="font-size:1.1rem;font-weight:700;display:block;text-align:center;cursor:pointer">${hasVal ? r : '—'}</span>
-        </td>`;
-        if (hasVal) { sum += r; cnt++; }
-      } else {
-        const smRow = SMILEYS.map((em, idx) => {
-          const on = r === idx;
-          return `<span class="sm ${on?'on':''}" title="${SM_LABELS[idx]}"
-            style="${on ? `border-color:${SM_COLORS[idx]};background:${SM_COLORS[idx]}22` : ''}"
-            onclick="toggleMuendlich(${si},'${t.datum}',${idx})">${em}</span>`;
-        }).join('');
-        h += `<td class="cell-sm"><div class="smrow">${smRow}</div></td>`;
-        if (r !== undefined && r !== null) { sum += SM_GRADES[r]; cnt++; }
-      }
+      const rm = (k.muendlich[si]  || {})[t.datum];
+      const rk = (k.kursarbeit[si] || {})[t.datum];
+      h += `<td class="cell-sm">
+        <div style="display:flex;align-items:center;gap:3px">
+          <span style="font-size:9px;color:#9fa8da;width:11px">M</span>
+          <div class="smrow">${smileyRow('m', si, t.datum, rm)}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:3px;margin-top:2px;border-top:1px dashed #eee;padding-top:2px">
+          <span style="font-size:9px;color:#9fa8da;width:11px">K</span>
+          <div class="smrow">${smileyRow('k', si, t.datum, rk)}</div>
+        </div>
+      </td>`;
+      if (rm !== undefined && rm !== null) { sum += ob ? rm : SM_GRADES[rm]; cnt++; }
+      if (rk !== undefined && rk !== null) { sum += ob ? rk : SM_GRADES[rk]; cnt++; }
     });
     if (cnt > 0) {
       const avg = sum / cnt;
@@ -530,67 +652,46 @@ function renderMuendlich(k) {
   wrap.innerHTML = h;
 }
 
-function toggleMuendlich(si, datum, idx) {
+function toggleMitarbeit(cat, si, datum, idx) {
   const k = cls(); if (!k) return;
-  if (!k.muendlich[si]) k.muendlich[si] = {};
-  if (k.muendlich[si][datum] === idx) delete k.muendlich[si][datum];
-  else k.muendlich[si][datum] = idx;
-  save(); renderMuendlich(k);
-}
-
-function showObPopup(ev, si, datum) {
-  ev.stopPropagation();
-  closePopup();
-  const k = cls(); if (!k) return;
-  const current = (k.muendlich[si] || {})[datum];
-  const p = document.createElement('div');
-  p.className = 'popup';
-  p.style.minWidth = '188px';
-  p.style.padding = '6px';
-  const r = ev.currentTarget.getBoundingClientRect();
-  p.style.top  = Math.min(r.bottom + 4, window.innerHeight - 260) + 'px';
-  p.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 200)) + 'px';
-
-  const grid = document.createElement('div');
-  grid.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:3px';
-  for (let i = 15; i >= 0; i--) {
-    const b = document.createElement('button');
-    b.innerHTML = `<strong>${i}</strong><br><span style="font-size:9px">${ptsToNoteStr(i)}</span>`;
-    b.style.cssText = `padding:4px 0;border-radius:4px;border:2px solid ${current===i?'#1a237e':'#e0e0e0'};background:#fff;cursor:pointer;font-size:11px;line-height:1.2;text-align:center`;
-    b.className = ptsColorCls(i);
-    const pts = i;
-    b.onclick = ev2 => {
-      ev2.stopPropagation();
-      const k2 = cls(); if (!k2.muendlich[si]) k2.muendlich[si] = {};
-      if (current === pts) delete k2.muendlich[si][datum];
-      else k2.muendlich[si][datum] = pts;
-      save(); renderMuendlich(cls()); closePopup();
-    };
-    grid.appendChild(b);
-  }
-  const clearBtn = document.createElement('button');
-  clearBtn.textContent = '× leer';
-  clearBtn.style.cssText = 'grid-column:span 4;padding:4px;border:none;border-radius:4px;background:#f5f5f5;color:#999;cursor:pointer;font-size:11px;margin-top:3px;width:100%';
-  clearBtn.onclick = ev2 => {
-    ev2.stopPropagation();
-    const k2 = cls(); if (k2.muendlich[si]) delete k2.muendlich[si][datum];
-    save(); renderMuendlich(cls()); closePopup();
-  };
-  p.appendChild(grid);
-  p.appendChild(clearBtn);
-  document.body.appendChild(p);
-  _popup = p;
-  setTimeout(() => document.addEventListener('click', closePopup, {once:true}), 0);
+  const obj = cat === 'k' ? k.kursarbeit : k.muendlich;
+  if (!obj[si]) obj[si] = {};
+  const ob = isOberstufe(k.name);
+  const val = ob ? OB_SMILEY_PTS[idx] : idx;
+  if (obj[si][datum] === val) delete obj[si][datum];
+  else obj[si][datum] = val;
+  save(); renderMuendlich(k); renderNoten(k);
 }
 
 // ══════════════════════════════════════════
 // NOTEN
 // ══════════════════════════════════════════
-function muendlichAvgGrade(si) {
+// 2. Halbjahr beginnt am 1. Februar; Aug–Jan = 1. Halbjahr, Feb–Jul = 2. Halbjahr
+function getHalbjahr(datum) {
+  const m = parseInt((datum || '').slice(5, 7), 10);
+  return (m >= 2 && m <= 7) ? 2 : 1;
+}
+
+// "Großzügige" Rundung wie im Hamburger Notenprogramm Divis: bei exaktem .5-Randwert
+// gewinnt die bessere (niedrigere) Note.
+function roundNoteGuenstig(v) {
+  const fl = Math.floor(v);
+  const r = (v - fl) <= 0.5 ? fl : fl + 1;
+  return Math.min(6, Math.max(1, r));
+}
+
+function mitarbeitAvgGrade(si, hj) {
   const k = cls(); if (!k) return null;
-  const entries = Object.values(k.muendlich[si] || {});
-  if (!entries.length) return null;
-  const vals = isOberstufe(k.name) ? entries : entries.map(r => SM_GRADES[r]);
+  const ob = isOberstufe(k.name);
+  let mEntries = Object.entries(k.muendlich[si] || {});
+  let kEntries = Object.entries((k.kursarbeit || {})[si] || {});
+  if (hj) {
+    mEntries = mEntries.filter(([d]) => getHalbjahr(d) === hj);
+    kEntries = kEntries.filter(([d]) => getHalbjahr(d) === hj);
+  }
+  const all = [...mEntries.map(([,v])=>v), ...kEntries.map(([,v])=>v)];
+  if (!all.length) return null;
+  const vals = ob ? all : all.map(r => SM_GRADES[r]);
   return vals.reduce((a,b)=>a+b,0) / vals.length;
 }
 
@@ -610,47 +711,102 @@ function arbeitGrade(arb, si) {
   return 6;
 }
 
-function renderNoten(k) {
-  const wrap = document.getElementById('no-wrap');
-  if (!k)                 { wrap.innerHTML = emptyHtml('Keine Klasse gewählt'); return; }
-  if (!k.schueler.length) { wrap.innerHTML = emptyHtml('Keine Schüler'); return; }
-
+// Note für ein Halbjahr (mG/aG-Gewichtung wie im Gewichtung-Dialog, gilt für beide Halbjahre gleich)
+function hjNote(si, hj) {
+  const k = cls(); if (!k) return null;
   const mG = k.gewichtung.m, aG = k.gewichtung.a;
-  let h = `<table><thead><tr>
-    <th class="col-name">Name</th>
-    <th>Mündlich (${mG}%)</th>`;
-  k.arbeiten.forEach(a => h += `<th>${esc(a.name)}</th>`);
-  h += '<th>Gesamtnote</th></tr></thead><tbody>';
+  const mAvg = mitarbeitAvgGrade(si, hj);
+  const arbHJ = k.arbeiten.filter(a => getHalbjahr(a.datum) === hj);
+  const aGrades = arbHJ.map(a => arbeitGrade(a, si)).filter(g => g !== null);
+  const aAvg = aGrades.length ? aGrades.reduce((a,b)=>a+b,0)/aGrades.length : null;
+  if (mAvg !== null && aAvg !== null) return (mAvg*mG + aAvg*aG) / (mG+aG);
+  if (mAvg !== null) return mAvg;
+  if (aAvg !== null) return aAvg;
+  return null;
+}
+
+// Endjahresnote (nur Klasse 5–10): 50% HJ1 + 50% HJ2, als Dezimalwert (Rundung erfolgt erst bei der Anzeige)
+function jahresnote(si) {
+  const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2);
+  if (hj1 === null && hj2 === null) return null;
+  if (hj1 === null) return hj2;
+  if (hj2 === null) return hj1;
+  return (hj1 + hj2) / 2;
+}
+
+function fmtNoteG(g, ob) {
+  if (g === null) return '<span style="color:#bbb">—</span>';
+  if (ob) {
+    const p = Math.round(g);
+    return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <small>(${ptsToNoteStr(p)})</small></span>`;
+  }
+  return `<span class="g${Math.min(6,Math.max(1,Math.round(g)))}">${g.toFixed(1)}</span>`;
+}
+
+// Für "Endnote"-Zellen (Note HJ1/HJ2, Jahresnote): Dezimalwert + gerundete Zeugnisnote in Klammern
+function fmtNoteFinal(g, ob) {
+  if (g === null) return '<span style="color:#bbb">—</span>';
+  if (ob) {
+    const p = Math.round(g);
+    return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <strong>(${ptsToNoteStr(p)})</strong></span>`;
+  }
+  const r = roundNoteGuenstig(g);
+  return `<span class="g${r}">${g.toFixed(1)} <strong>(${r})</strong></span>`;
+}
+
+let noteView = 'hj1'; // 'hj1' | 'hj2' | 'jahr'
+function switchNoteView(id) { noteView = id; renderNoten(cls()); }
+
+function renderNoten(k) {
+  const pills = document.getElementById('no-pills');
+  const wrap  = document.getElementById('no-wrap');
+  if (!k)                 { pills.innerHTML = ''; wrap.innerHTML = emptyHtml('Keine Klasse gewählt'); return; }
+  if (!k.schueler.length) { pills.innerHTML = ''; wrap.innerHTML = emptyHtml('Keine Schüler'); return; }
 
   const ob = isOberstufe(k.name);
-  const fmtG = g => {
-    if (g === null) return '<span style="color:#bbb">—</span>';
-    if (ob) {
-      const p = Math.round(g);
-      return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <small>(${ptsToNoteStr(p)})</small></span>`;
-    }
-    return `<span class="g${Math.min(6,Math.max(1,Math.round(g)))}">${typeof g === 'number' ? g.toFixed(1) : g}</span>`;
-  };
+  const views = ob
+    ? [['hj1','1. Halbjahr'],['hj2','2. Halbjahr']]
+    : [['hj1','1. Halbjahr'],['hj2','2. Halbjahr'],['jahr','Jahresnote']];
+  if (!views.some(v => v[0] === noteView)) noteView = 'hj1';
+  pills.innerHTML = views.map(([id,label]) =>
+    `<span class="pill ${noteView===id?'active':''}" onclick="switchNoteView('${id}')">${label}</span>`
+  ).join('');
 
-  k.schueler.forEach((s, si) => {
-    const mAvg   = muendlichAvgGrade(si);
-    const aGrades = k.arbeiten.map(a => arbeitGrade(a, si));
-    const validA  = aGrades.filter(g => g !== null);
-    const aAvg    = validA.length ? validA.reduce((a,b)=>a+b,0)/validA.length : null;
+  const mG = k.gewichtung.m, aG = k.gewichtung.a;
+  let h;
 
-    let final = null;
-    if (mAvg !== null && aAvg !== null) final = (mAvg*mG + aAvg*aG) / (mG+aG);
-    else if (mAvg !== null) final = mAvg;
-    else if (aAvg !== null) final = aAvg;
+  if (noteView === 'jahr') {
+    h = `<table><thead><tr><th class="col-name">Name</th><th>Note 1. Halbjahr</th><th>Note 2. Halbjahr</th><th>Jahresnote</th></tr></thead><tbody>`;
+    k.schueler.forEach((s, si) => {
+      const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2), jn = jahresnote(si);
+      h += `<tr>
+        <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
+        <td style="text-align:center">${fmtNoteFinal(hj1, ob)}</td>
+        <td style="text-align:center">${fmtNoteFinal(hj2, ob)}</td>
+        <td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(jn, ob)}</td>
+      </tr>`;
+    });
+    h += '</tbody></table>';
+  } else {
+    const hj = noteView === 'hj2' ? 2 : 1;
+    const arbHJ = k.arbeiten.filter(a => getHalbjahr(a.datum) === hj);
+    h = `<table><thead><tr><th class="col-name">Name</th><th>Mitarbeit (${mG}%)</th>`;
+    arbHJ.forEach(a => h += `<th>${esc(a.name)}</th>`);
+    h += `<th>Note ${hj}. Halbjahr</th></tr></thead><tbody>`;
 
-    h += `<tr>
-      <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
-      <td style="text-align:center">${fmtG(mAvg)}</td>`;
-    aGrades.forEach(g => h += `<td style="text-align:center">${fmtG(g)}</td>`);
-    h += `<td style="text-align:center;font-size:1.05rem">${fmtG(final)}</td></tr>`;
-  });
+    k.schueler.forEach((s, si) => {
+      const mAvg = mitarbeitAvgGrade(si, hj);
+      const aGrades = arbHJ.map(a => arbeitGrade(a, si));
+      const final = hjNote(si, hj);
+      h += `<tr>
+        <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
+        <td style="text-align:center">${fmtNoteG(mAvg, ob)}</td>`;
+      aGrades.forEach(g => h += `<td style="text-align:center">${fmtNoteG(g, ob)}</td>`);
+      h += `<td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(final, ob)}</td></tr>`;
+    });
+    h += '</tbody></table>';
+  }
 
-  h += '</tbody></table>';
   wrap.innerHTML = h;
 }
 
@@ -847,6 +1003,107 @@ function updateNS(ai, idx, v) {
 }
 
 // ══════════════════════════════════════════
+// GRUPPENARBEITSGENERATOR
+// ══════════════════════════════════════════
+function renderGruppen(k) {
+  const wrap = document.getElementById('gr-wrap');
+  if (!k)                 { wrap.innerHTML = emptyHtml('Keine Klasse gewählt'); return; }
+  if (!k.schueler.length) { wrap.innerHTML = emptyHtml('Keine Schüler'); return; }
+
+  const sorted = [...k.termine].sort((a,b) => a.datum.localeCompare(b.datum));
+  if (!grState.datum && sorted.length) grState.datum = sorted[sorted.length - 1].datum;
+
+  let excludedCount = 0;
+  let poolSize = k.schueler.length;
+  if (grState.filterAbwesend && grState.datum) {
+    poolSize = 0;
+    k.schueler.forEach((s, si) => {
+      const st = (k.anwesenheit[si] || {})[grState.datum] || '';
+      const abwesend = st === 'E' || st === 'Q' || st === 'U';
+      if (abwesend) excludedCount++; else poolSize++;
+    });
+  }
+
+  const terminOpts = sorted.map(t =>
+    `<option value="${t.datum}" ${t.datum===grState.datum?'selected':''}>${fmtDate(t.datum)}${t.thema?' – '+esc(t.thema):''}</option>`
+  ).join('');
+
+  let h = `<div class="card" style="margin-bottom:14px">
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+      <label style="font-size:12.5px;color:#555">Anzahl Gruppen
+        <input type="number" min="2" max="${Math.max(2,k.schueler.length)}" value="${grState.n}" class="ns-inp" style="width:50px;margin-left:5px" onchange="grSetN(this.value)">
+      </label>
+      <label style="font-size:12.5px;color:#555">
+        <input type="checkbox" ${grState.filterAbwesend?'checked':''} onchange="grSetFilter(this.checked)">
+        Fehlende ausschließen (Stand:
+        <select style="font-size:12px;padding:2px 4px" onchange="grSetDatum(this.value)" ${!sorted.length?'disabled':''}>
+          ${sorted.length ? terminOpts : '<option>– keine Termine –</option>'}
+        </select>)
+      </label>
+      <button class="btn btn-blue" onclick="wuerfelGruppen()">🔀 Gruppen würfeln</button>
+      <span style="font-size:12px;color:#888">${poolSize} von ${k.schueler.length} Schüler${(grState.filterAbwesend && grState.datum) ? ` berücksichtigt (${excludedCount} fehlend ausgeschlossen)` : ''}</span>
+    </div>
+  </div>`;
+
+  if (!grGroups || !grGroups.length) {
+    h += emptyHtml('Noch keine Gruppen gewürfelt', 'Klicke auf "🔀 Gruppen würfeln".');
+    wrap.innerHTML = h;
+    return;
+  }
+
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px">';
+  grGroups.forEach((g, gi) => {
+    h += `<div class="card">
+      <h4 style="color:#1a237e;font-size:13.5px;margin-bottom:8px">Gruppe ${gi+1}</h4>
+      <ul style="list-style:none;display:flex;flex-direction:column;gap:5px">`;
+    g.forEach(si => {
+      const s = k.schueler[si];
+      const isSprecher = g.sprecher === si;
+      h += `<li style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;border-radius:5px;${isSprecher?'background:#e8eaf6':''}"
+        onclick="setSprecher(${gi},${si})" title="Als Sprecher markieren">
+        <span style="font-size:13px">${isSprecher?'🗣':'•'}</span>
+        <span style="font-size:13px${isSprecher?';font-weight:700;color:#1a237e':''}">${esc(s.nachname)}, ${esc(s.vorname)}</span>
+      </li>`;
+    });
+    h += `</ul></div>`;
+  });
+  h += '</div>';
+  wrap.innerHTML = h;
+}
+
+function grSetN(v) { grState.n = Math.max(2, parseInt(v) || 2); }
+function grSetFilter(v) { grState.filterAbwesend = v; renderGruppen(cls()); }
+function grSetDatum(v) { grState.datum = v; renderGruppen(cls()); }
+
+function wuerfelGruppen() {
+  const k = cls(); if (!k) return;
+  let pool = k.schueler.map((s, si) => si);
+  if (grState.filterAbwesend && grState.datum) {
+    pool = pool.filter(si => {
+      const st = (k.anwesenheit[si] || {})[grState.datum] || '';
+      return !(st === 'E' || st === 'Q' || st === 'U');
+    });
+  }
+  if (pool.length < 2) { alert('Zu wenige verfügbare Schüler für eine Gruppeneinteilung.'); return; }
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  const n = Math.min(grState.n, pool.length);
+  const groups = Array.from({length: n}, () => []);
+  pool.forEach((si, idx) => groups[idx % n].push(si));
+  groups.forEach(g => { g.sprecher = g[Math.floor(Math.random() * g.length)]; });
+  grGroups = groups;
+  renderGruppen(k);
+}
+
+function setSprecher(gi, si) {
+  if (!grGroups || !grGroups[gi]) return;
+  grGroups[gi].sprecher = si;
+  renderGruppen(cls());
+}
+
+// ══════════════════════════════════════════
 // MODALS
 // ══════════════════════════════════════════
 function showModal(html) {
@@ -925,7 +1182,7 @@ function doAddTerminMore() { doAddTermin(true); }
 function openGewichtungModal() {
   const k = cls(); if (!k) return;
   showModal(`<h2>Notengewichtung</h2>
-    <div class="field"><label>Mündliche Mitarbeit (%)</label>
+    <div class="field"><label>Mitarbeit (mündlich + Kursarbeit) (%)</label>
       <input type="number" id="m-mg" value="${k.gewichtung.m}" min="0" max="100"
         oninput="document.getElementById('m-ag').value=100-parseInt(this.value||0)">
     </div>
@@ -1249,8 +1506,14 @@ function exportExcel() {
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([anwHead,...anwRows]), 'Anwesenheit');
 
-  // Mündlich
+  // Mündlich & Kursarbeit
   const obEx = isOberstufe(k.name);
+  function catAvg(catObj, si) {
+    const entries = Object.values(catObj[si] || {});
+    if (!entries.length) return null;
+    const vals = obEx ? entries : entries.map(r => SM_GRADES[r]);
+    return vals.reduce((a,b)=>a+b,0) / vals.length;
+  }
   const muHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
   const muRows = k.schueler.map((s,si) => {
     const cells = sorted.map(t => {
@@ -1258,25 +1521,37 @@ function exportExcel() {
       if (r===undefined) return '';
       return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
     });
-    const avg   = muendlichAvgGrade(si);
+    const avg   = catAvg(k.muendlich, si);
     const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
     return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([muHead,...muRows]), 'Mündliche Mitarbeit');
 
-  // Notenübersicht
-  const noHead = ['Name','Mündlich Ø', ...k.arbeiten.map(a=>a.name), 'Gesamtnote'];
+  const kaHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
+  const kaRows = k.schueler.map((s,si) => {
+    const cells = sorted.map(t => {
+      const r=((k.kursarbeit||{})[si]||{})[t.datum];
+      if (r===undefined) return '';
+      return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
+    });
+    const avg   = catAvg(k.kursarbeit || {}, si);
+    const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
+    return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([kaHead,...kaRows]), 'Kursarbeit');
+
+  // Notenübersicht (Halbjahresnoten + Jahresnote)
+  function fmtExportNote(g) {
+    if (g === null) return '';
+    if (obEx) { const p = Math.round(g); return `${g.toFixed(1)} (${ptsToNoteStr(p)})`; }
+    return `${g.toFixed(1)} (${roundNoteGuenstig(g)})`;
+  }
+  const noHead = ['Name', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
   const noRows = k.schueler.map((s,si) => {
-    const mA = muendlichAvgGrade(si);
-    const aG = k.arbeiten.map(a => arbeitGrade(a,si));
-    const vA = aG.filter(g=>g!==null);
-    const aAvg = vA.length ? vA.reduce((a,b)=>a+b,0)/vA.length : null;
-    const {m,a} = k.gewichtung;
-    let fin = null;
-    if(mA!==null&&aAvg!==null) fin=((mA*m+aAvg*a)/(m+a)).toFixed(1);
-    else if(mA!==null) fin=mA.toFixed(1);
-    else if(aAvg!==null) fin=aAvg.toFixed(1);
-    return [`${s.nachname}, ${s.vorname}`, mA!==null?mA.toFixed(1):'', ...aG.map(g=>g||''), fin||''];
+    const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2);
+    const row = [`${s.nachname}, ${s.vorname}`, fmtExportNote(hj1), fmtExportNote(hj2)];
+    if (!obEx) row.push(fmtExportNote(jahresnote(si)));
+    return row;
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([noHead,...noRows]), 'Notenübersicht');
 
@@ -1304,6 +1579,7 @@ function switchTab(btn) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  if (btn.dataset.tab === 'gruppen') renderGruppen(cls());
 }
 
 function fmtDate(iso) {
