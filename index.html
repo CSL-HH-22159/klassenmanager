@@ -166,6 +166,16 @@ tbody tr:hover .col-name{background:#fafafa}
     <div class="toolbar">
       <h3>Mitarbeit (Mündlich &amp; Kursarbeit)</h3>
       <span id="mu-hint" style="font-size:12px;color:#888">Smiley anklicken = Note vergeben / erneut anklicken = löschen · oben Mündlich (M), unten Kursarbeit (K)</span>
+      <button id="mu-selbtn" class="btn btn-gray" onclick="toggleMuSelMode()">☑ Mehrfachauswahl</button>
+    </div>
+    <div id="mu-selbar" style="display:none;background:#e8eaf6;border-radius:6px;padding:6px 12px;margin-bottom:8px;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px">
+      <span id="mu-selcount">0 ausgewählt</span>
+      <button class="btn btn-sm btn-gray" onclick="selectAllMuCells()">☑ Alle auswählen</button>
+      <button class="btn btn-sm" style="background:#eceff1;color:#546e7a" onclick="applyMitarbeitEntfaellt('m')" title="Für die Auswahl entfällt die mündliche Bewertung – zählt nicht in die Note">🚫 Mündlich entfällt</button>
+      <button class="btn btn-sm" style="background:#eceff1;color:#546e7a" onclick="applyMitarbeitEntfaellt('k')" title="Für die Auswahl entfällt die Kursarbeits-Bewertung – zählt nicht in die Note">🚫 Kursarbeit entfällt</button>
+      <button class="btn btn-sm" style="background:#eceff1;color:#546e7a" onclick="applyMitarbeitEntfaellt('mk')" title="Für die Auswahl entfallen beide Bewertungen">🚫 Beides entfällt</button>
+      <button class="btn btn-sm" style="background:#e8f5e9;color:#2e7d32" onclick="applyMitarbeitEntfaellt('reset')" title="Entfällt-Markierungen der Auswahl entfernen (vergebene Noten bleiben)">↩ Zurücksetzen</button>
+      <button class="btn btn-sm btn-gray" onclick="clearMuSel()">Auswahl aufheben</button>
     </div>
     <div id="mu-wrap" class="tbl-wrap"></div>
   </div>
@@ -247,6 +257,11 @@ let state = { classes: {}, cur: null, curArbeit: 0 };
 // Anwesenheit: Mehrfachauswahl (nicht persistiert)
 let anwSelMode = false;
 let anwSel = new Set();
+
+// Mitarbeit: Mehrfachauswahl für Entfällt-Markierungen (nicht persistiert).
+// Sentinel 'X' in muendlich/kursarbeit = "entfällt", zählt nicht in die Notenberechnung.
+let muSelMode = false;
+let muSel = new Set();
 
 // Gruppen: aktuelle Würfelung (nicht persistiert)
 let grState = { n: 4, datum: '', filterAbwesend: true };
@@ -357,6 +372,7 @@ function switchClass(name) {
   state.curArbeit = 0;
   grGroups = null; grState.datum = '';
   anwSelMode = false; anwSel.clear();
+  muSelMode = false; muSel.clear();
   save(); updateDropdown(); renderAll();
 }
 
@@ -726,7 +742,12 @@ function renderMuendlich(k) {
   const sorted = [...k.termine].sort((a,b) => a.datum.localeCompare(b.datum));
   let h = '<table><thead><tr><th class="col-name">Name</th>';
   sorted.forEach(t => {
-    h += `<th style="min-width:150px"><div>${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
+    let colSel = '';
+    if (muSelMode) {
+      const all = k.schueler.length > 0 && k.schueler.every(s => muSel.has(s.id + '|' + t.datum));
+      colSel = `<input type="checkbox" ${all?'checked':''} title="Ganze Stunde auswählen" style="vertical-align:middle;margin-right:3px" onclick="event.stopPropagation();toggleMuColumn('${t.datum}')">`;
+    }
+    h += `<th style="min-width:150px"><div>${colSel}${fmtDate(t.datum)}</div><div style="font-size:10px;font-weight:400;color:#5c6bc0">${esc(t.thema)}</div></th>`;
   });
   h += `<th style="min-width:80px;text-align:center">Ø ${ob ? 'Punkte' : 'Note'}</th></tr></thead><tbody>`;
 
@@ -745,24 +766,49 @@ function renderMuendlich(k) {
     return row;
   }
 
+  // "entfällt"-Anzeige: ausgegraut, Klick hebt die Markierung einzeln wieder auf
+  function entfHtml(cat, sid, datum) {
+    return `<span onclick="clearMitarbeitEntfaellt('${cat}','${sid}','${datum}')"
+      title="Entfällt – zählt nicht in die Note. Klicken zum Zurücksetzen"
+      style="flex:1;text-align:center;font-size:11px;color:#9e9e9e;font-style:italic;background:#f0f0f0;border-radius:4px;padding:3px 6px;cursor:pointer">entfällt</span>`;
+  }
+  function muShort(v) {
+    if (v === 'X') return '<span style="color:#9e9e9e;font-style:italic">entf.</span>';
+    if (v === undefined || v === null) return '–';
+    if (ob) { const idx = OB_SMILEY_PTS.indexOf(v); return idx >= 0 ? SMILEYS[idx] : v + 'P'; }
+    return SMILEYS[v] || '–';
+  }
+
   k.schueler.forEach((s, i) => {
     h += `<tr><td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let sum = 0, cnt = 0;
     sorted.forEach(t => {
       const rm = (k.muendlich[s.id]  || {})[t.datum];
       const rk = (k.kursarbeit[s.id] || {})[t.datum];
-      h += `<td class="cell-sm">
-        <div style="display:flex;align-items:center;gap:3px">
-          <span style="font-size:9px;color:#9fa8da;width:11px">M</span>
-          <div class="smrow">${smileyRow('m', s.id, t.datum, rm)}</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:3px;margin-top:2px;border-top:1px dashed #eee;padding-top:2px">
-          <span style="font-size:9px;color:#9fa8da;width:11px">K</span>
-          <div class="smrow">${smileyRow('k', s.id, t.datum, rk)}</div>
-        </div>
-      </td>`;
-      if (rm !== undefined && rm !== null) { sum += ob ? rm : SM_GRADES[rm]; cnt++; }
-      if (rk !== undefined && rk !== null) { sum += ob ? rk : SM_GRADES[rk]; cnt++; }
+      if (muSelMode) {
+        const checked = muSel.has(s.id + '|' + t.datum);
+        h += `<td class="cell-sm" style="cursor:pointer;${checked?'background:#c5cae9':''}" onclick="toggleMuCell('${s.id}','${t.datum}')">
+          <div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 2px;pointer-events:none">
+            <input type="checkbox" ${checked?'checked':''}>
+            <span style="font-size:12px;color:#555">M: ${muShort(rm)} · K: ${muShort(rk)}</span>
+          </div>
+        </td>`;
+      } else {
+        const rowM = rm === 'X' ? entfHtml('m', s.id, t.datum) : `<div class="smrow">${smileyRow('m', s.id, t.datum, rm)}</div>`;
+        const rowK = rk === 'X' ? entfHtml('k', s.id, t.datum) : `<div class="smrow">${smileyRow('k', s.id, t.datum, rk)}</div>`;
+        h += `<td class="cell-sm"${(rm==='X'&&rk==='X')?' style="background:#fafafa"':''}>
+          <div style="display:flex;align-items:center;gap:3px${rm==='X'?';opacity:.65':''}">
+            <span style="font-size:9px;color:#9fa8da;width:11px">M</span>
+            ${rowM}
+          </div>
+          <div style="display:flex;align-items:center;gap:3px;margin-top:2px;border-top:1px dashed #eee;padding-top:2px${rk==='X'?';opacity:.65':''}">
+            <span style="font-size:9px;color:#9fa8da;width:11px">K</span>
+            ${rowK}
+          </div>
+        </td>`;
+      }
+      if (rm !== undefined && rm !== null && rm !== 'X') { sum += ob ? rm : SM_GRADES[rm]; cnt++; }
+      if (rk !== undefined && rk !== null && rk !== 'X') { sum += ob ? rk : SM_GRADES[rk]; cnt++; }
     });
     if (cnt > 0) {
       const avg = sum / cnt;
@@ -794,6 +840,89 @@ function toggleMitarbeit(cat, sid, datum, idx) {
   save(); renderMuendlich(k); renderNoten(k);
 }
 
+// ── Mehrfachauswahl im Mitarbeit-Tab: Stunden als "entfällt" markieren ──
+function toggleMuSelMode() {
+  muSelMode = !muSelMode;
+  if (!muSelMode) muSel.clear();
+  const btn = document.getElementById('mu-selbtn');
+  if (btn) {
+    btn.textContent = muSelMode ? '✕ Auswahl beenden' : '☑ Mehrfachauswahl';
+    btn.className = muSelMode ? 'btn btn-blue' : 'btn btn-gray';
+  }
+  updateMuSelBar();
+  renderMuendlich(cls());
+}
+
+function toggleMuCell(sid, datum) {
+  const key = sid + '|' + datum;
+  if (muSel.has(key)) muSel.delete(key); else muSel.add(key);
+  updateMuSelBar();
+  renderMuendlich(cls());
+}
+
+function toggleMuColumn(datum) {
+  const k = cls(); if (!k) return;
+  const all = k.schueler.length > 0 && k.schueler.every(s => muSel.has(s.id + '|' + datum));
+  k.schueler.forEach(s => {
+    const key = s.id + '|' + datum;
+    if (all) muSel.delete(key); else muSel.add(key);
+  });
+  updateMuSelBar(); renderMuendlich(k);
+}
+
+function selectAllMuCells() {
+  const k = cls(); if (!k) return;
+  const total = k.schueler.length * k.termine.length;
+  const allSelected = total > 0 && muSel.size >= total;
+  muSel.clear();
+  if (!allSelected) {
+    k.schueler.forEach(s => k.termine.forEach(t => muSel.add(s.id + '|' + t.datum)));
+  }
+  updateMuSelBar(); renderMuendlich(k);
+}
+
+function clearMuSel() {
+  muSel.clear();
+  updateMuSelBar();
+  renderMuendlich(cls());
+}
+
+function updateMuSelBar() {
+  const bar = document.getElementById('mu-selbar');
+  const cnt = document.getElementById('mu-selcount');
+  if (!bar || !cnt) return;
+  bar.style.display = muSelMode ? 'flex' : 'none';
+  cnt.textContent = muSel.size + ' ausgewählt';
+}
+
+// mode: 'm' | 'k' | 'mk' = entsprechende Bewertung entfällt (überschreibt ggf. vergebene Note),
+// 'reset' = Entfällt-Markierungen entfernen (vergebene Noten bleiben unangetastet)
+function applyMitarbeitEntfaellt(mode) {
+  const k = cls(); if (!k || !muSel.size) return;
+  muSel.forEach(key => {
+    const idx = key.indexOf('|');
+    const sid = key.slice(0, idx);
+    const datum = key.slice(idx + 1);
+    if (mode === 'reset') {
+      if (k.muendlich[sid]  && k.muendlich[sid][datum]  === 'X') delete k.muendlich[sid][datum];
+      if (k.kursarbeit[sid] && k.kursarbeit[sid][datum] === 'X') delete k.kursarbeit[sid][datum];
+    } else {
+      if (mode === 'm' || mode === 'mk') { if (!k.muendlich[sid])  k.muendlich[sid]  = {}; k.muendlich[sid][datum]  = 'X'; }
+      if (mode === 'k' || mode === 'mk') { if (!k.kursarbeit[sid]) k.kursarbeit[sid] = {}; k.kursarbeit[sid][datum] = 'X'; }
+    }
+  });
+  muSel.clear();
+  save(); updateMuSelBar(); renderMuendlich(k); renderNoten(k);
+}
+
+// Einzelne Entfällt-Markierung per Klick auf das "entfällt"-Label aufheben
+function clearMitarbeitEntfaellt(cat, sid, datum) {
+  const k = cls(); if (!k) return;
+  const obj = cat === 'k' ? k.kursarbeit : k.muendlich;
+  if (obj[sid] && obj[sid][datum] === 'X') delete obj[sid][datum];
+  save(); renderMuendlich(k); renderNoten(k);
+}
+
 // ══════════════════════════════════════════
 // NOTEN
 // ══════════════════════════════════════════
@@ -820,7 +949,8 @@ function mitarbeitAvgGrade(sid, hj) {
     mEntries = mEntries.filter(([d]) => getHalbjahr(d) === hj);
     kEntries = kEntries.filter(([d]) => getHalbjahr(d) === hj);
   }
-  const all = [...mEntries.map(([,v])=>v), ...kEntries.map(([,v])=>v)];
+  // 'X' = "entfällt" – fließt nicht in den Schnitt ein
+  const all = [...mEntries.map(([,v])=>v), ...kEntries.map(([,v])=>v)].filter(v => v !== 'X');
   if (!all.length) return null;
   const vals = ob ? all : all.map(r => SM_GRADES[r]);
   return vals.reduce((a,b)=>a+b,0) / vals.length;
@@ -1818,7 +1948,7 @@ function exportExcel() {
   // Mündlich & Kursarbeit
   const obEx = isOberstufe(k.name);
   function catAvg(catObj, sid) {
-    const entries = Object.values(catObj[sid] || {});
+    const entries = Object.values(catObj[sid] || {}).filter(v => v !== 'X');
     if (!entries.length) return null;
     const vals = obEx ? entries : entries.map(r => SM_GRADES[r]);
     return vals.reduce((a,b)=>a+b,0) / vals.length;
@@ -1828,6 +1958,7 @@ function exportExcel() {
     const cells = sorted.map(t => {
       const r=(k.muendlich[s.id]||{})[t.datum];
       if (r===undefined) return '';
+      if (r==='X') return 'entfällt';
       return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
     });
     const avg   = catAvg(k.muendlich, s.id);
@@ -1841,6 +1972,7 @@ function exportExcel() {
     const cells = sorted.map(t => {
       const r=((k.kursarbeit||{})[s.id]||{})[t.datum];
       if (r===undefined) return '';
+      if (r==='X') return 'entfällt';
       return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
     });
     const avg   = catAvg(k.kursarbeit || {}, s.id);
