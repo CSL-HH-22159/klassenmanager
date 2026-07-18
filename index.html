@@ -90,6 +90,9 @@ tbody tr:hover .col-name{background:#fafafa}
 .ns-inp{width:42px;text-align:center;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px}
 .pts-inp{width:54px;text-align:center;border:1px solid #ddd;border-radius:4px;padding:3px;font-size:12px}
 .th-inp{width:52px;text-align:center;border:1px solid #ddd;border-radius:4px;padding:2px;font-size:12px;font-weight:500}
+.name-inp{border:1px solid transparent;border-radius:4px;padding:2px 4px;font-size:12.5px;background:transparent;font-family:inherit}
+.name-inp:hover{border-color:#ddd}
+.name-inp:focus{outline:none;border-color:#1a237e;background:#fff}
 
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:900;align-items:center;justify-content:center}
 #overlay.show{display:flex}
@@ -262,11 +265,11 @@ function showSyncBanner() {
     const d = new Date(ts);
     const fmt = d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})
               + ' ' + d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
-    text.textContent = `Lokaler Stand vom ${fmt}. Auf anderem Gerät gearbeitet? → Datei laden für aktuellen OneDrive-Stand.`;
+    text.textContent = `Lokaler Stand vom ${fmt}. Auf anderem Gerät gearbeitet? → Mit Microsoft anmelden (empfohlen) oder Datei laden für den aktuellen OneDrive-Stand.`;
   } else if (!hasData) {
-    text.textContent = 'Noch keine Daten. Neue Klasse anlegen oder Datendatei aus OneDrive laden.';
+    text.textContent = 'Noch keine Daten. Mit Microsoft anmelden (empfohlen), neue Klasse anlegen oder Datendatei laden.';
   } else {
-    text.textContent = 'Für OneDrive-Sync: Datendatei laden.';
+    text.textContent = 'Für OneDrive-Sync: Mit Microsoft anmelden (empfohlen) oder Datendatei laden.';
   }
   banner.style.display = 'flex';
 }
@@ -282,14 +285,66 @@ function saveLocal() {
   } catch(e) {}
 }
 function save() {
+  // Zeitstempel wandert mit den Daten (localStorage, Datei UND Cloud) – Grundlage für
+  // die Warnung, wenn ein älterer Stand einen neueren überschreiben würde.
+  state.savedAt = new Date().toISOString();
   saveLocal();
   if (getMsalAccount()) scheduleGraphSave();
   else writeToHandle();
 }
+
+function fmtTs(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})
+       + ' ' + d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+}
 function cls() {
   const k = state.cur ? state.classes[state.cur] : null;
-  if (k && !k.kursarbeit) k.kursarbeit = {};
+  if (k) {
+    // Fehlende Unterfelder ergänzen (ältere/fremde JSON-Dateien), statt später zu crashen
+    if (!Array.isArray(k.schueler)) k.schueler = [];
+    if (!Array.isArray(k.termine))  k.termine  = [];
+    if (!Array.isArray(k.arbeiten)) k.arbeiten = [];
+    if (!k.anwesenheit) k.anwesenheit = {};
+    if (!k.muendlich)   k.muendlich   = {};
+    if (!k.kursarbeit)  k.kursarbeit  = {};
+    if (!k.gewichtung)  k.gewichtung  = { m: 60, a: 40 };
+    // Einmalige Korrektur: der alte Default stand fälschlich auf 40% Mitarbeit / 60% schriftlich –
+    // richtig ist 60% Mitarbeit (mündlich + Kursarbeit) / 40% schriftlich. Nur unkorrigierte
+    // Klassen mit exakt dem alten Default werden gedreht; danach nie wieder angefasst,
+    // damit eine bewusste manuelle Einstellung erhalten bleibt.
+    if (!k.gwKorrigiert) {
+      if (k.gewichtung.m === 40 && k.gewichtung.a === 60) k.gewichtung = { m: 60, a: 40 };
+      k.gwKorrigiert = true;
+    }
+    ensureSchuelerIds(k);
+  }
   return k;
+}
+
+// Vergibt jedem Schüler eine stabile ID (statt Listenposition), damit Anwesenheit/Noten
+// beim Umsortieren (z.B. nach Hinzufügen eines neuen Schülers) nicht verrutschen.
+// Bestehende Schüler ohne ID bekommen ihre aktuelle Position als ID zugewiesen, wodurch
+// alle bisherigen Zuordnungen unverändert erhalten bleiben.
+function ensureSchuelerIds(k) {
+  if (typeof k.nextSchuelerId !== 'number') k.nextSchuelerId = 0;
+  const anyHasId = k.schueler.some(s => s.id !== undefined && s.id !== null);
+  if (!anyHasId && k.schueler.length) {
+    // Erstmalige Migration einer noch nicht umgestellten Klasse: aktuelle Position wird
+    // zur ID, damit alle bisherigen (positionsbasierten) Zuordnungen erhalten bleiben.
+    k.schueler.forEach((s, idx) => { s.id = String(idx); });
+  } else {
+    // Bereits migrierte Klasse: neue Schüler ohne ID bekommen eine frische, garantiert
+    // eindeutige ID (niemals die aktuelle Position, da die mit bestehenden IDs kollidieren könnte).
+    k.schueler.forEach(s => {
+      if (s.id === undefined || s.id === null) s.id = String(k.nextSchuelerId++);
+    });
+  }
+  k.schueler.forEach(s => {
+    const n = parseInt(s.id, 10);
+    if (!isNaN(n) && n >= k.nextSchuelerId) k.nextSchuelerId = n + 1;
+  });
 }
 
 // ══════════════════════════════════════════
@@ -313,9 +368,11 @@ function addNewClass(name, schueler, termine) {
     muendlich:   {},
     kursarbeit:  {},
     arbeiten:    [],
-    gewichtung:  { m: 40, a: 60 }
+    gewichtung:  { m: 60, a: 40 },
+    gwKorrigiert: true
   };
   state.cur = name;
+  ensureSchuelerIds(state.classes[name]);
   save(); updateDropdown(); renderAll();
 }
 
@@ -367,9 +424,11 @@ function renderAnwesenheit(k) {
         ⚠ Noch keine Unterrichtstermine – Tabelle erscheint sobald du einen Termin hinzufügst.
       </div>
       <table><thead><tr><th class="col-name">Name</th></tr></thead><tbody>`;
-    k.schueler.forEach((s, si) => {
-      h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}
-        <button class="btn btn-sm" style="margin-left:4px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler(${si})" title="Schüler löschen">×</button>
+    k.schueler.forEach(s => {
+      h += `<tr><td class="col-name">
+        <input class="name-inp" style="width:76px" value="${esc(s.nachname)}" onchange="updateSchuelerName('${s.id}','nachname',this.value)">
+        <input class="name-inp" style="width:64px" value="${esc(s.vorname)}" onchange="updateSchuelerName('${s.id}','vorname',this.value)">
+        <button class="btn btn-sm" style="margin-left:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler('${s.id}')" title="Schüler löschen">×</button>
       </td></tr>`;
     });
     h += `</tbody></table></div>`;
@@ -381,32 +440,34 @@ function renderAnwesenheit(k) {
   let h = '<table><thead><tr><th class="col-name">Name</th>';
 
   sorted.forEach(t => {
-    h += `<th style="min-width:64px">
+    h += `<th style="min-width:92px">
       <div>${fmtDate(t.datum)}</div>
-      <div style="font-size:10px;font-weight:400;color:#5c6bc0;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="${esc(t.thema)}">${esc(t.thema)}</div>
+      <input class="name-inp" style="width:84px;font-weight:400;font-size:10.5px;text-align:center" value="${esc(t.thema)}" placeholder="Thema" title="Thema der Stunde" onchange="updateTerminThema('${t.datum}',this.value)">
       <button class="btn btn-sm" style="margin-top:3px;background:#eceff1;color:#546e7a" onclick="ausfallColumn('${t.datum}')">Ausfall</button>
       <button class="btn btn-sm" style="margin-top:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteTermin('${t.datum}')">×</button>
     </th>`;
   });
   h += '<th style="min-width:60px;text-align:center">Fehltage</th></tr></thead><tbody>';
 
-  k.schueler.forEach((s, si) => {
-    h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}
-      <button class="btn btn-sm" style="margin-left:4px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler(${si})" title="Schüler löschen">×</button>
+  k.schueler.forEach(s => {
+    h += `<tr><td class="col-name">
+      <input class="name-inp" style="width:76px" value="${esc(s.nachname)}" onchange="updateSchuelerName('${s.id}','nachname',this.value)">
+      <input class="name-inp" style="width:64px" value="${esc(s.vorname)}" onchange="updateSchuelerName('${s.id}','vorname',this.value)">
+      <button class="btn btn-sm" style="margin-left:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler('${s.id}')" title="Schüler löschen">×</button>
     </td>`;
     let fehlt = 0;
     sorted.forEach(t => {
-      const st = (k.anwesenheit[si] || {})[t.datum] || '';
+      const st = (k.anwesenheit[s.id] || {})[t.datum] || '';
       if (st === 'E' || st === 'Q' || st === 'U') fehlt++;
       const cfg = STATUS_CFG[st] || STATUS_CFG[''];
       if (anwSelMode) {
-        const checked = anwSel.has(si + '|' + t.datum);
-        h += `<td class="cell-st" style="${checked?'background:#c5cae9':''}" onclick="toggleAnwCell(${si},'${t.datum}')">
+        const checked = anwSel.has(s.id + '|' + t.datum);
+        h += `<td class="cell-st" style="${checked?'background:#c5cae9':''}" onclick="toggleAnwCell('${s.id}','${t.datum}')">
           <input type="checkbox" ${checked?'checked':''} style="pointer-events:none;vertical-align:middle;margin-right:3px">
           <button class="sbtn ${cfg.cls}" title="${cfg.title}" style="pointer-events:none">${cfg.label}</button>
         </td>`;
       } else {
-        h += `<td class="cell-st" onclick="showStatusPopup(event,${si},'${t.datum}')">
+        h += `<td class="cell-st" onclick="showStatusPopup(event,'${s.id}','${t.datum}')">
           <button class="sbtn ${cfg.cls}" title="${cfg.title}">${cfg.label}</button>
         </td>`;
       }
@@ -419,7 +480,7 @@ function renderAnwesenheit(k) {
   h += '<tr style="background:#f5f5f5;font-weight:600"><td class="col-name" style="background:#f5f5f5">∑ Klasse</td>';
   sorted.forEach(t => {
     const cnt = {A:0,E:0,Q:0,U:0,F:0,V:0};
-    k.schueler.forEach((s,si) => { const st=(k.anwesenheit[si]||{})[t.datum]; if(st)cnt[st]++; });
+    k.schueler.forEach(s => { const st=(k.anwesenheit[s.id]||{})[t.datum]; if(st)cnt[st]++; });
     h += `<td style="text-align:center;font-size:11px;line-height:1.8">
       <span style="color:#1b5e20">${cnt.A}×A</span> <span style="color:#0d47a1">${cnt.E}×E</span> <span style="color:#b71c1c">${cnt.U}×U</span>${cnt.V ? ` <span style="color:#4527a0">${cnt.V}×V</span>` : ''}
     </td>`;
@@ -429,7 +490,7 @@ function renderAnwesenheit(k) {
 }
 
 let _popup = null;
-function showStatusPopup(ev, si, datum) {
+function showStatusPopup(ev, sid, datum) {
   ev.stopPropagation();
   closePopup();
   const p = document.createElement('div');
@@ -449,7 +510,7 @@ function showStatusPopup(ev, si, datum) {
   ].forEach(o => {
     const b = document.createElement('button');
     b.className = o.cls; b.textContent = o.label;
-    b.onclick = ev2 => { ev2.stopPropagation(); setAnwesenheit(si, datum, o.st); closePopup(); };
+    b.onclick = ev2 => { ev2.stopPropagation(); setAnwesenheit(sid, datum, o.st); closePopup(); };
     p.appendChild(b);
   });
 
@@ -459,11 +520,11 @@ function showStatusPopup(ev, si, datum) {
 }
 function closePopup() { if (_popup) { _popup.remove(); _popup = null; } }
 
-function setAnwesenheit(si, datum, status) {
+function setAnwesenheit(sid, datum, status) {
   const k = cls(); if (!k) return;
-  if (!k.anwesenheit[si]) k.anwesenheit[si] = {};
-  if (status === '') delete k.anwesenheit[si][datum];
-  else k.anwesenheit[si][datum] = status;
+  if (!k.anwesenheit[sid]) k.anwesenheit[sid] = {};
+  if (status === '') delete k.anwesenheit[sid][datum];
+  else k.anwesenheit[sid][datum] = status;
   save(); renderAnwesenheit(k);
 }
 
@@ -479,8 +540,8 @@ function toggleAnwSelMode() {
   renderAnwesenheit(cls());
 }
 
-function toggleAnwCell(si, datum) {
-  const key = si + '|' + datum;
+function toggleAnwCell(sid, datum) {
+  const key = sid + '|' + datum;
   if (anwSel.has(key)) anwSel.delete(key); else anwSel.add(key);
   updateAnwSelBar();
   renderAnwesenheit(cls());
@@ -533,11 +594,11 @@ function applyBulkStatus(status) {
   const k = cls(); if (!k) return;
   anwSel.forEach(key => {
     const idx = key.indexOf('|');
-    const si = parseInt(key.slice(0, idx));
+    const sid = key.slice(0, idx);
     const datum = key.slice(idx + 1);
-    if (!k.anwesenheit[si]) k.anwesenheit[si] = {};
-    if (status === '') delete k.anwesenheit[si][datum];
-    else k.anwesenheit[si][datum] = status;
+    if (!k.anwesenheit[sid]) k.anwesenheit[sid] = {};
+    if (status === '') delete k.anwesenheit[sid][datum];
+    else k.anwesenheit[sid][datum] = status;
   });
   anwSel.clear();
   save(); updateAnwSelBar(); renderAnwesenheit(k);
@@ -545,41 +606,55 @@ function applyBulkStatus(status) {
 
 function ausfallColumn(datum) {
   const k = cls(); if (!k) return;
-  k.schueler.forEach((s, si) => {
-    if (!k.anwesenheit[si]) k.anwesenheit[si] = {};
-    k.anwesenheit[si][datum] = 'F';
+  k.schueler.forEach(s => {
+    if (!k.anwesenheit[s.id]) k.anwesenheit[s.id] = {};
+    k.anwesenheit[s.id][datum] = 'F';
   });
   save(); renderAnwesenheit(k);
 }
 
-function confirmDeleteSchueler(si) {
+function updateSchuelerName(sid, field, value) {
   const k = cls(); if (!k) return;
+  const v = value.trim();
+  if (!v) { renderAll(); return; }
+  const s = k.schueler.find(x => x.id === sid);
+  if (!s) return;
+  s[field] = v;
+  save(); renderAll();
+}
+
+function confirmDeleteSchueler(sid) {
+  const k = cls(); if (!k) return;
+  const si = k.schueler.findIndex(x => x.id === sid);
+  if (si === -1) return;
   const s = k.schueler[si];
   if (!confirm(`"${s.vorname} ${s.nachname}" entfernen?`)) return;
   k.schueler.splice(si, 1);
-  // Shift-Indizes neu aufbauen
-  function shiftObj(obj) {
-    const out = {};
-    Object.entries(obj).forEach(([i,v]) => { const n=parseInt(i); if(n<si)out[n]=v; else if(n>si)out[n-1]=v; });
-    return out;
-  }
-  k.anwesenheit = shiftObj(k.anwesenheit);
-  k.muendlich   = shiftObj(k.muendlich);
-  k.kursarbeit  = shiftObj(k.kursarbeit || {});
-  k.arbeiten.forEach(arb => { arb.ergebnisse = shiftObj(arb.ergebnisse || {}); });
+  delete k.anwesenheit[sid];
+  delete k.muendlich[sid];
+  delete k.kursarbeit[sid];
+  k.arbeiten.forEach(arb => { if (arb.ergebnisse) delete arb.ergebnisse[sid]; });
   anwSel.clear();
+  save(); renderAll();
+}
+
+function updateTerminThema(datum, value) {
+  const k = cls(); if (!k) return;
+  const t = k.termine.find(x => x.datum === datum);
+  if (!t) return;
+  t.thema = value.trim();
   save(); renderAll();
 }
 
 function confirmDeleteTermin(datum) {
   const k = cls(); if (!k) return;
   const t = k.termine.find(x => x.datum === datum);
-  if (!confirm(`Termin ${fmtDate(datum)} (${esc(t ? t.thema : '')}) löschen?`)) return;
+  if (!confirm(`Termin ${fmtDate(datum)} (${t && t.thema ? t.thema : 'ohne Thema'}) löschen?`)) return;
   k.termine = k.termine.filter(x => x.datum !== datum);
-  k.schueler.forEach((s,si) => {
-    if (k.anwesenheit[si]) delete k.anwesenheit[si][datum];
-    if (k.muendlich[si])   delete k.muendlich[si][datum];
-    if (k.kursarbeit[si])  delete k.kursarbeit[si][datum];
+  k.schueler.forEach(s => {
+    if (k.anwesenheit[s.id]) delete k.anwesenheit[s.id][datum];
+    if (k.muendlich[s.id])   delete k.muendlich[s.id][datum];
+    if (k.kursarbeit[s.id])  delete k.kursarbeit[s.id][datum];
   });
   anwSel.clear();
   save(); renderAll();
@@ -605,29 +680,35 @@ function renderMuendlich(k) {
   });
   h += `<th style="min-width:80px;text-align:center">Ø ${ob ? 'Punkte' : 'Note'}</th></tr></thead><tbody>`;
 
-  function smileyRow(cat, si, datum, val) {
-    return SMILEYS.map((em, idx) => {
+  function smileyRow(cat, sid, datum, val) {
+    let row = SMILEYS.map((em, idx) => {
       const on = ob ? val === OB_SMILEY_PTS[idx] : val === idx;
       return `<span class="sm ${on?'on':''}" title="${SM_LABELS[idx]}"
         style="${on ? `border-color:${SM_COLORS[idx]};background:${SM_COLORS[idx]}22` : ''}"
-        onclick="toggleMitarbeit('${cat}',${si},'${datum}',${idx})">${em}</span>`;
+        onclick="toggleMitarbeit('${cat}','${sid}','${datum}',${idx})">${em}</span>`;
     }).join('');
+    // Oberstufe: Punktwert aus der alten 0-15-Eingabe, der keinem Smiley entspricht -
+    // ohne Badge sähe die Zelle leer aus, obwohl der Wert zählt.
+    if (ob && val !== undefined && val !== null && !OB_SMILEY_PTS.includes(val)) {
+      row += `<span class="${ptsColorCls(val)}" title="Punktwert aus alter Eingabe – zählt im Schnitt; Smiley-Klick überschreibt" style="font-size:10px;margin-left:3px">${val}P</span>`;
+    }
+    return row;
   }
 
-  k.schueler.forEach((s, si) => {
+  k.schueler.forEach(s => {
     h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let sum = 0, cnt = 0;
     sorted.forEach(t => {
-      const rm = (k.muendlich[si]  || {})[t.datum];
-      const rk = (k.kursarbeit[si] || {})[t.datum];
+      const rm = (k.muendlich[s.id]  || {})[t.datum];
+      const rk = (k.kursarbeit[s.id] || {})[t.datum];
       h += `<td class="cell-sm">
         <div style="display:flex;align-items:center;gap:3px">
           <span style="font-size:9px;color:#9fa8da;width:11px">M</span>
-          <div class="smrow">${smileyRow('m', si, t.datum, rm)}</div>
+          <div class="smrow">${smileyRow('m', s.id, t.datum, rm)}</div>
         </div>
         <div style="display:flex;align-items:center;gap:3px;margin-top:2px;border-top:1px dashed #eee;padding-top:2px">
           <span style="font-size:9px;color:#9fa8da;width:11px">K</span>
-          <div class="smrow">${smileyRow('k', si, t.datum, rk)}</div>
+          <div class="smrow">${smileyRow('k', s.id, t.datum, rk)}</div>
         </div>
       </td>`;
       if (rm !== undefined && rm !== null) { sum += ob ? rm : SM_GRADES[rm]; cnt++; }
@@ -652,14 +733,14 @@ function renderMuendlich(k) {
   wrap.innerHTML = h;
 }
 
-function toggleMitarbeit(cat, si, datum, idx) {
+function toggleMitarbeit(cat, sid, datum, idx) {
   const k = cls(); if (!k) return;
   const obj = cat === 'k' ? k.kursarbeit : k.muendlich;
-  if (!obj[si]) obj[si] = {};
+  if (!obj[sid]) obj[sid] = {};
   const ob = isOberstufe(k.name);
   const val = ob ? OB_SMILEY_PTS[idx] : idx;
-  if (obj[si][datum] === val) delete obj[si][datum];
-  else obj[si][datum] = val;
+  if (obj[sid][datum] === val) delete obj[sid][datum];
+  else obj[sid][datum] = val;
   save(); renderMuendlich(k); renderNoten(k);
 }
 
@@ -680,11 +761,11 @@ function roundNoteGuenstig(v) {
   return Math.min(6, Math.max(1, r));
 }
 
-function mitarbeitAvgGrade(si, hj) {
+function mitarbeitAvgGrade(sid, hj) {
   const k = cls(); if (!k) return null;
   const ob = isOberstufe(k.name);
-  let mEntries = Object.entries(k.muendlich[si] || {});
-  let kEntries = Object.entries((k.kursarbeit || {})[si] || {});
+  let mEntries = Object.entries(k.muendlich[sid] || {});
+  let kEntries = Object.entries((k.kursarbeit || {})[sid] || {});
   if (hj) {
     mEntries = mEntries.filter(([d]) => getHalbjahr(d) === hj);
     kEntries = kEntries.filter(([d]) => getHalbjahr(d) === hj);
@@ -695,8 +776,8 @@ function mitarbeitAvgGrade(si, hj) {
   return vals.reduce((a,b)=>a+b,0) / vals.length;
 }
 
-function arbeitGrade(arb, si) {
-  const ergs = (arb.ergebnisse || {})[si];
+function arbeitGrade(arb, sid) {
+  const ergs = (arb.ergebnisse || {})[sid];
   if (!ergs || !ergs.some(e => e !== '' && e !== undefined && e !== null)) return null;
   const maxTotal = arb.aufgaben.reduce((s,a) => s+(parseFloat(a.punkte)||0), 0);
   if (!maxTotal) return null;
@@ -712,12 +793,12 @@ function arbeitGrade(arb, si) {
 }
 
 // Note für ein Halbjahr (mG/aG-Gewichtung wie im Gewichtung-Dialog, gilt für beide Halbjahre gleich)
-function hjNote(si, hj) {
+function hjNote(sid, hj) {
   const k = cls(); if (!k) return null;
   const mG = k.gewichtung.m, aG = k.gewichtung.a;
-  const mAvg = mitarbeitAvgGrade(si, hj);
+  const mAvg = mitarbeitAvgGrade(sid, hj);
   const arbHJ = k.arbeiten.filter(a => getHalbjahr(a.datum) === hj);
-  const aGrades = arbHJ.map(a => arbeitGrade(a, si)).filter(g => g !== null);
+  const aGrades = arbHJ.map(a => arbeitGrade(a, sid)).filter(g => g !== null);
   const aAvg = aGrades.length ? aGrades.reduce((a,b)=>a+b,0)/aGrades.length : null;
   if (mAvg !== null && aAvg !== null) return (mAvg*mG + aAvg*aG) / (mG+aG);
   if (mAvg !== null) return mAvg;
@@ -726,8 +807,8 @@ function hjNote(si, hj) {
 }
 
 // Endjahresnote (nur Klasse 5–10): 50% HJ1 + 50% HJ2, als Dezimalwert (Rundung erfolgt erst bei der Anzeige)
-function jahresnote(si) {
-  const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2);
+function jahresnote(sid) {
+  const hj1 = hjNote(sid, 1), hj2 = hjNote(sid, 2);
   if (hj1 === null && hj2 === null) return null;
   if (hj1 === null) return hj2;
   if (hj2 === null) return hj1;
@@ -754,7 +835,8 @@ function fmtNoteFinal(g, ob) {
   return `<span class="g${r}">${g.toFixed(1)} <strong>(${r})</strong></span>`;
 }
 
-let noteView = 'hj1'; // 'hj1' | 'hj2' | 'jahr'
+// 'hj1' | 'hj2' | 'jahr' – startet im Halbjahr, in dem wir uns laut Datum gerade befinden
+let noteView = getHalbjahr(new Date().toISOString().slice(0,10)) === 2 ? 'hj2' : 'hj1';
 function switchNoteView(id) { noteView = id; renderNoten(cls()); }
 
 function renderNoten(k) {
@@ -777,8 +859,8 @@ function renderNoten(k) {
 
   if (noteView === 'jahr') {
     h = `<table><thead><tr><th class="col-name">Name</th><th>Note 1. Halbjahr</th><th>Note 2. Halbjahr</th><th>Jahresnote</th></tr></thead><tbody>`;
-    k.schueler.forEach((s, si) => {
-      const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2), jn = jahresnote(si);
+    k.schueler.forEach(s => {
+      const hj1 = hjNote(s.id, 1), hj2 = hjNote(s.id, 2), jn = jahresnote(s.id);
       h += `<tr>
         <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
         <td style="text-align:center">${fmtNoteFinal(hj1, ob)}</td>
@@ -794,10 +876,10 @@ function renderNoten(k) {
     arbHJ.forEach(a => h += `<th>${esc(a.name)}</th>`);
     h += `<th>Note ${hj}. Halbjahr</th></tr></thead><tbody>`;
 
-    k.schueler.forEach((s, si) => {
-      const mAvg = mitarbeitAvgGrade(si, hj);
-      const aGrades = arbHJ.map(a => arbeitGrade(a, si));
-      const final = hjNote(si, hj);
+    k.schueler.forEach(s => {
+      const mAvg = mitarbeitAvgGrade(s.id, hj);
+      const aGrades = arbHJ.map(a => arbeitGrade(a, s.id));
+      const final = hjNote(s.id, hj);
       h += `<tr>
         <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
         <td style="text-align:center">${fmtNoteG(mAvg, ob)}</td>`;
@@ -904,35 +986,36 @@ function renderArbeiten(k) {
     <th style="text-align:center">Note</th>
   </tr></thead><tbody>`;
 
-  k.schueler.forEach((s, si) => {
-    if (!arb.ergebnisse[si]) arb.ergebnisse[si] = [];
+  k.schueler.forEach(s => {
+    const sid = s.id;
+    if (!arb.ergebnisse[sid]) arb.ergebnisse[sid] = [];
     let earned = 0;
     h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     arb.aufgaben.forEach((auf, oi) => {
-      const v = arb.ergebnisse[si][oi] !== undefined ? arb.ergebnisse[si][oi] : '';
+      const v = arb.ergebnisse[sid][oi] !== undefined ? arb.ergebnisse[sid][oi] : '';
       if (v !== '') earned += parseFloat(v) || 0;
       h += `<td style="text-align:center"><input class="pts-inp" type="number" value="${v}" min="0" max="${auf.punkte}" step="0.5"
-        onchange="setErgebnis(${ai},${si},${oi},this.value)" id="pts-${ai}-${si}-${oi}"></td>`;
+        onchange="setErgebnis(${ai},'${sid}',${oi},this.value)" id="pts-${ai}-${sid}-${oi}"></td>`;
     });
     const pct = maxTotal ? (earned/maxTotal*100).toFixed(1) : '—';
-    const g   = arbeitGrade(arb, si);
+    const g   = arbeitGrade(arb, sid);
     const gHtml = g !== null
       ? (ob ? `<span class="${ptsColorCls(g)}" style="font-size:1.1rem">${g}<br><small style="font-size:10px">${ptsToNoteStr(g)}</small></span>`
             : `<span class="g${g}" style="font-size:1.1rem">${g}</span>`)
       : '—';
     h += `<td></td>
-      <td style="text-align:center;font-size:12px" id="tot-${ai}-${si}">${earned}/${maxTotal}<br><span style="color:#888">${pct}%</span></td>
-      <td style="text-align:center" id="grd-${ai}-${si}">${gHtml}</td>
+      <td style="text-align:center;font-size:12px" id="tot-${ai}-${sid}">${earned}/${maxTotal}<br><span style="color:#888">${pct}%</span></td>
+      <td style="text-align:center" id="grd-${ai}-${sid}">${gHtml}</td>
     </tr>`;
   });
 
   // Klassenschnitt
-  const vGrades = k.schueler.map((_,si) => arbeitGrade(arb,si)).filter(g=>g!==null);
+  const vGrades = k.schueler.map(s => arbeitGrade(arb,s.id)).filter(g=>g!==null);
   const avgG    = vGrades.length ? (vGrades.reduce((a,b)=>a+b,0)/vGrades.length).toFixed(1) : '—';
   h += `<tr style="background:#f5f5f5;font-weight:600"><td class="col-name" style="background:#f5f5f5">Ø Klasse</td>`;
   arb.aufgaben.forEach((auf,oi) => {
-    const colAvg = k.schueler.reduce((_,s,si)=>{
-      return _ + (parseFloat((arb.ergebnisse[si]||[])[oi])||0);
+    const colAvg = k.schueler.reduce((_,s)=>{
+      return _ + (parseFloat((arb.ergebnisse[s.id]||[])[oi])||0);
     },0) / k.schueler.length;
     h += `<td style="text-align:center;color:#555">${colAvg.toFixed(1)}</td>`;
   });
@@ -942,20 +1025,20 @@ function renderArbeiten(k) {
   body.innerHTML = h;
 }
 
-function setErgebnis(ai, si, oi, val) {
+function setErgebnis(ai, sid, oi, val) {
   const k = cls(); if (!k) return;
   const arb = k.arbeiten[ai];
-  if (!arb.ergebnisse[si]) arb.ergebnisse[si] = [];
-  arb.ergebnisse[si][oi] = val === '' ? '' : parseFloat(val) || 0;
+  if (!arb.ergebnisse[sid]) arb.ergebnisse[sid] = [];
+  arb.ergebnisse[sid][oi] = val === '' ? '' : parseFloat(val) || 0;
   save();
   // Nur Summen-Zelle und Noten-Zelle updaten
-  const ergs = arb.ergebnisse[si];
+  const ergs = arb.ergebnisse[sid];
   const maxT  = arb.aufgaben.reduce((s,a)=>s+(parseFloat(a.punkte)||0),0);
   const earn  = ergs.reduce((s,p)=>s+(parseFloat(p)||0),0);
   const pct   = maxT ? (earn/maxT*100).toFixed(1) : '—';
-  const g     = arbeitGrade(arb, si);
-  const tc = document.getElementById(`tot-${ai}-${si}`);
-  const gc = document.getElementById(`grd-${ai}-${si}`);
+  const g     = arbeitGrade(arb, sid);
+  const tc = document.getElementById(`tot-${ai}-${sid}`);
+  const gc = document.getElementById(`grd-${ai}-${sid}`);
   const ob2 = isOberstufe(k ? k.name : '');
   if (tc) tc.innerHTML = `${earn}/${maxT}<br><span style="color:#888">${pct}%</span>`;
   if (gc) gc.innerHTML = g !== null
@@ -988,8 +1071,8 @@ function confirmDeleteArbeit(ai) {
   save(); renderArbeiten(k); renderNoten(k);
 }
 
-function arbRename(ai, v)        { const k=cls();if(!k)return;k.arbeiten[ai].name=v;save();renderArbeiten(k); }
-function arbSetDate(ai, v)       { const k=cls();if(!k)return;k.arbeiten[ai].datum=v;save(); }
+function arbRename(ai, v)        { const k=cls();if(!k)return;k.arbeiten[ai].name=v;save();renderArbeiten(k);renderNoten(k); }
+function arbSetDate(ai, v)       { const k=cls();if(!k)return;k.arbeiten[ai].datum=v;save();renderArbeiten(k);renderNoten(k); }
 function arbAufgName(ai,oi,v)    { const k=cls();if(!k)return;k.arbeiten[ai].aufgaben[oi].name=v;save(); }
 function arbAufgPunkte(ai,oi,v)  { const k=cls();if(!k)return;k.arbeiten[ai].aufgaben[oi].punkte=parseFloat(v)||0;save();renderArbeiten(k);renderNoten(k); }
 function updateNS(ai, idx, v) {
@@ -1017,8 +1100,8 @@ function renderGruppen(k) {
   let poolSize = k.schueler.length;
   if (grState.filterAbwesend && grState.datum) {
     poolSize = 0;
-    k.schueler.forEach((s, si) => {
-      const st = (k.anwesenheit[si] || {})[grState.datum] || '';
+    k.schueler.forEach(s => {
+      const st = (k.anwesenheit[s.id] || {})[grState.datum] || '';
       const abwesend = st === 'E' || st === 'Q' || st === 'U';
       if (abwesend) excludedCount++; else poolSize++;
     });
@@ -1056,11 +1139,12 @@ function renderGruppen(k) {
     h += `<div class="card">
       <h4 style="color:#1a237e;font-size:13.5px;margin-bottom:8px">Gruppe ${gi+1}</h4>
       <ul style="list-style:none;display:flex;flex-direction:column;gap:5px">`;
-    g.forEach(si => {
-      const s = k.schueler[si];
-      const isSprecher = g.sprecher === si;
+    g.forEach(sid => {
+      const s = k.schueler.find(x => x.id === sid);
+      if (!s) return;
+      const isSprecher = g.sprecher === sid;
       h += `<li style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;border-radius:5px;${isSprecher?'background:#e8eaf6':''}"
-        onclick="setSprecher(${gi},${si})" title="Als Sprecher markieren">
+        onclick="setSprecher(${gi},'${sid}')" title="Als Sprecher markieren">
         <span style="font-size:13px">${isSprecher?'🗣':'•'}</span>
         <span style="font-size:13px${isSprecher?';font-weight:700;color:#1a237e':''}">${esc(s.nachname)}, ${esc(s.vorname)}</span>
       </li>`;
@@ -1077,10 +1161,10 @@ function grSetDatum(v) { grState.datum = v; renderGruppen(cls()); }
 
 function wuerfelGruppen() {
   const k = cls(); if (!k) return;
-  let pool = k.schueler.map((s, si) => si);
+  let pool = k.schueler.map(s => s.id);
   if (grState.filterAbwesend && grState.datum) {
-    pool = pool.filter(si => {
-      const st = (k.anwesenheit[si] || {})[grState.datum] || '';
+    pool = pool.filter(sid => {
+      const st = (k.anwesenheit[sid] || {})[grState.datum] || '';
       return !(st === 'E' || st === 'Q' || st === 'U');
     });
   }
@@ -1091,15 +1175,15 @@ function wuerfelGruppen() {
   }
   const n = Math.min(grState.n, pool.length);
   const groups = Array.from({length: n}, () => []);
-  pool.forEach((si, idx) => groups[idx % n].push(si));
+  pool.forEach((sid, idx) => groups[idx % n].push(sid));
   groups.forEach(g => { g.sprecher = g[Math.floor(Math.random() * g.length)]; });
   grGroups = groups;
   renderGruppen(k);
 }
 
-function setSprecher(gi, si) {
+function setSprecher(gi, sid) {
   if (!grGroups || !grGroups[gi]) return;
-  grGroups[gi].sprecher = si;
+  grGroups[gi].sprecher = sid;
   renderGruppen(cls());
 }
 
@@ -1196,7 +1280,7 @@ function openGewichtungModal() {
 }
 function doSaveGewichtung() {
   const k = cls(); if (!k) return;
-  const m = parseInt(document.getElementById('m-mg').value) || 40;
+  const m = parseInt(document.getElementById('m-mg').value) || 60;
   k.gewichtung = {m, a: 100-m};
   save(); renderNoten(k); closeModal();
 }
@@ -1210,9 +1294,17 @@ function doSaveGewichtung() {
 const MS_CLIENT_ID = '3e2c3604-c31d-465d-bed4-777eff1e0b34';
 const MS_TENANT_ID = '1ec883c9-e58e-4a81-a220-9f26696a86fd';
 const GRAPH_FILE   = 'https://graph.microsoft.com/v1.0/me/drive/root:/Schule/Schuljahr 2026_2027/klassenmanager_data.json:/content';
+// Metadaten-URL derselben Datei (ohne :/content) – liefert das eTag für den Konfliktschutz
+const GRAPH_ITEM   = 'https://graph.microsoft.com/v1.0/me/drive/root:/Schule/Schuljahr 2026_2027/klassenmanager_data.json';
+// Tages-Backup: eine Datei pro Wochentag = automatische 7-Tage-Rotation ohne Aufräum-Logik
+const GRAPH_BACKUP = wd => `https://graph.microsoft.com/v1.0/me/drive/root:/Schule/Schuljahr 2026_2027/klassenmanager_backup_${wd}.json:/content`;
 
 let msalApp = null;
 let _graphTimer = null;
+// eTag der zuletzt gesehenen Cloud-Datei. Beim Speichern per If-Match mitgeschickt:
+// hat ein anderes Gerät zwischenzeitlich gespeichert, lehnt OneDrive mit 412 ab,
+// statt dass wir dessen Stand stumm überschreiben.
+let _graphETag = null;
 
 function initMsal() {
   if (typeof msal === 'undefined' || window._msalFailed) {
@@ -1273,6 +1365,20 @@ async function toggleMsLogin() {
   const acc = getMsalAccount();
   if (acc) {
     if (!confirm(`${acc.name || acc.username} abmelden?`)) return;
+    // Ausstehenden (verzögerten) Cloud-Save noch abschließen, bevor irgendetwas gelöscht wird
+    if (_graphTimer) {
+      clearTimeout(_graphTimer); _graphTimer = null;
+      try { await _putGraph(); } catch(e) { console.warn('Flush vor Logout fehlgeschlagen:', e); }
+    }
+    // Auf Schul-/Fremdrechnern sollen keine Schülerdaten im Browser zurückbleiben
+    if (confirm('Lokale Daten auf DIESEM Gerät ebenfalls löschen?\n\n' +
+      'OK = löschen (empfohlen auf Schul- und Fremdrechnern; die Daten bleiben in OneDrive erhalten)\n' +
+      'Abbrechen = lokale Kopie behalten (eigener Rechner)')) {
+      localStorage.removeItem('km_v3');
+      localStorage.removeItem('km_v3_ts');
+      localStorage.removeItem('km_backup_date');
+      state = { classes: {}, cur: null, curArbeit: 0 };
+    }
     try { await msalApp.logoutRedirect({ account: acc, postLogoutRedirectUri: window.location.href }); } catch(e) {}
   } else {
     try {
@@ -1285,11 +1391,14 @@ async function toggleMsLogin() {
   }
 }
 
+let _lastToken = null; // zuletzt erfolgreiches Token, für den Not-Save beim Schließen des Tabs
+
 async function getToken() {
   const acc = getMsalAccount();
   if (!acc) throw new Error('Nicht angemeldet');
   try {
     const r = await msalApp.acquireTokenSilent({ scopes: ['Files.ReadWrite'], account: acc });
+    _lastToken = r.accessToken;
     return r.accessToken;
   } catch {
     await msalApp.acquireTokenRedirect({ scopes: ['Files.ReadWrite'], account: getMsalAccount() });
@@ -1297,12 +1406,38 @@ async function getToken() {
   }
 }
 
+// Der Cloud-Save ist um 1,5 s verzögert - wird der Tab in diesem Fenster geschlossen,
+// ginge die letzte Änderung in OneDrive verloren. keepalive-Fetch feuert sie noch ab.
+window.addEventListener('pagehide', () => {
+  if (_graphTimer && _lastToken) {
+    clearTimeout(_graphTimer);
+    _graphTimer = null;
+    try {
+      const headers = { Authorization: `Bearer ${_lastToken}`, 'Content-Type': 'application/json' };
+      // If-Match auch hier: hat ein anderes Gerät inzwischen gespeichert, schlägt der
+      // Not-Save lieber fehl (localStorage hat die Änderung; der Zeitstempel-Schutz
+      // beim nächsten Laden meldet die Abweichung), statt fremde Daten zu überschreiben.
+      if (_graphETag) headers['If-Match'] = _graphETag;
+      fetch(GRAPH_FILE, { method: 'PUT', keepalive: true, headers, body: JSON.stringify(state) });
+    } catch(e) {}
+  }
+});
+
 async function loadFromGraph() {
   try {
     const token = await getToken();
-    const resp  = await fetch(GRAPH_FILE, { headers: { Authorization: `Bearer ${token}` } });
+    // Erst Metadaten holen: liefert das eTag für den If-Match-Konfliktschutz beim Speichern
+    const meta = await fetch(GRAPH_ITEM + '?$select=eTag', { headers: { Authorization: `Bearer ${token}` } });
+    if (meta.status === 404) {
+      await _putGraph(token, true);
+      dismissBanner();
+      setSaveStatus('☁️ OneDrive eingerichtet', '#a5d6a7');
+      return;
+    }
+    if (meta.ok) { try { _graphETag = (await meta.json()).eTag || null; } catch(e) { _graphETag = null; } }
+    const resp = await fetch(GRAPH_FILE, { headers: { Authorization: `Bearer ${token}` } });
     if (resp.status === 404) {
-      await _putGraph(token);
+      await _putGraph(token, true);
       dismissBanner();
       setSaveStatus('☁️ OneDrive eingerichtet', '#a5d6a7');
       return;
@@ -1310,6 +1445,20 @@ async function loadFromGraph() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     if (!data.classes) throw new Error('Unbekanntes Format');
+    // Schutz vor Datenverlust: Cloud-Stand ist älter als der lokale Stand
+    // (z.B. Änderungen vor dem Login gemacht) -> nachfragen statt stumm überschreiben.
+    if (data.savedAt && state.savedAt && data.savedAt < state.savedAt) {
+      const laden = confirm(
+        `⚠ Der OneDrive-Stand (${fmtTs(data.savedAt)}) ist ÄLTER als der Stand auf diesem Gerät (${fmtTs(state.savedAt)}).\n\n` +
+        `OK = älteren OneDrive-Stand laden (Änderungen auf diesem Gerät gehen verloren)\n` +
+        `Abbrechen = Stand dieses Geräts behalten und in OneDrive hochladen`);
+      if (!laden) {
+        await _putGraph(token);
+        dismissBanner();
+        setSaveStatus('☁️ lokaler Stand hochgeladen', '#a5d6a7');
+        return;
+      }
+    }
     Object.assign(state, data);
     saveLocal(); updateDropdown(); renderAll(); dismissBanner();
     const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
@@ -1320,14 +1469,20 @@ async function loadFromGraph() {
   }
 }
 
-async function _putGraph(tokenArg) {
+// force=true überspringt den If-Match-Schutz (Erstanlage bzw. bewusstes Überschreiben)
+async function _putGraph(tokenArg, force) {
   const token = tokenArg || await getToken();
-  const resp  = await fetch(GRAPH_FILE, {
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  if (_graphETag && !force) headers['If-Match'] = _graphETag;
+  const resp = await fetch(GRAPH_FILE, {
     method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(state, null, 2)
   });
+  if (resp.status === 412) { const err = new Error('Konflikt'); err.code = 412; throw err; }
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  // Neues eTag aus der Antwort übernehmen, damit der nächste Save wieder geschützt ist
+  try { const item = await resp.json(); if (item && item.eTag) _graphETag = item.eTag; } catch(e) {}
 }
 
 async function writeToGraph() {
@@ -1336,10 +1491,58 @@ async function writeToGraph() {
     await _putGraph();
     const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     setSaveStatus('☁️ gespeichert ' + now, '#a5d6a7');
+    dailyBackup();
   } catch(e) {
+    if (e.code === 412) { await handleGraphConflict(); return; }
     setSaveStatus('🔴 Sync-Fehler', '#ef9a9a');
     console.error('writeToGraph:', e);
   }
+}
+
+// OneDrive hat den Save abgelehnt: ein anderes Gerät hat seit unserem letzten Laden
+// gespeichert. Nutzer entscheidet, welcher Stand gewinnt - nichts wird stumm überschrieben.
+async function handleGraphConflict() {
+  try {
+    const token = await getToken();
+    const resp = await fetch(GRAPH_FILE, { headers: { Authorization: `Bearer ${token}` } });
+    const remote = resp.ok ? await resp.json() : null;
+    const remoteTs = remote && remote.savedAt ? fmtTs(remote.savedAt) : 'unbekannt';
+    const uebernehmen = confirm(
+      `⚠ Konflikt: Die OneDrive-Daten wurden zwischenzeitlich von einem anderen Gerät geändert (Stand: ${remoteTs}).\n\n` +
+      `OK = Stand des anderen Geräts laden (die letzte Änderung hier geht verloren)\n` +
+      `Abbrechen = eigenen Stand durchsetzen (überschreibt den Stand des anderen Geräts)`);
+    if (uebernehmen && remote && remote.classes) {
+      const meta = await fetch(GRAPH_ITEM + '?$select=eTag', { headers: { Authorization: `Bearer ${token}` } });
+      if (meta.ok) { try { _graphETag = (await meta.json()).eTag || null; } catch(e) {} }
+      Object.assign(state, remote);
+      saveLocal(); updateDropdown(); renderAll();
+      setSaveStatus('☁️ Stand vom anderen Gerät geladen', '#a5d6a7');
+    } else {
+      await _putGraph(token, true);
+      const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+      setSaveStatus('☁️ gespeichert (überschrieben) ' + now, '#a5d6a7');
+    }
+  } catch(e) {
+    setSaveStatus('🔴 Sync-Konflikt ungelöst', '#ef9a9a');
+    console.error('handleGraphConflict:', e);
+  }
+}
+
+// Einmal pro Tag zusätzlich eine Backup-Datei schreiben (pro Wochentag eine ->
+// rollierendes 7-Tage-Fenster ohne Aufräum-Logik). Fehler sind bewusst folgenlos.
+async function dailyBackup() {
+  try {
+    const today = new Date().toISOString().slice(0,10);
+    if (localStorage.getItem('km_backup_date') === today) return;
+    const wd = ['So','Mo','Di','Mi','Do','Fr','Sa'][new Date().getDay()];
+    const token = await getToken();
+    const resp = await fetch(GRAPH_BACKUP(wd), {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(state, null, 2)
+    });
+    if (resp.ok) localStorage.setItem('km_backup_date', today);
+  } catch(e) {}
 }
 
 function scheduleGraphSave() {
@@ -1369,6 +1572,18 @@ async function openDataFile() {
     const file  = await h.getFile();
     const data  = JSON.parse(await file.text());
     if (!data.classes) throw new Error('Ungültiges Dateiformat.');
+    // Schutz vor Datenverlust: Datei-Stand ist älter als der Stand auf diesem Gerät
+    if (data.savedAt && state.savedAt && data.savedAt < state.savedAt) {
+      const laden = confirm(
+        `⚠ Die Datei (${fmtTs(data.savedAt)}) ist ÄLTER als der Stand auf diesem Gerät (${fmtTs(state.savedAt)}).\n\n` +
+        `OK = älteren Datei-Stand laden (Änderungen auf diesem Gerät gehen verloren)\n` +
+        `Abbrechen = Stand dieses Geräts behalten und in die Datei schreiben`);
+      if (!laden) {
+        await writeToHandle();
+        dismissBanner();
+        return;
+      }
+    }
     Object.assign(state, data);
     saveLocal(); updateDropdown(); renderAll();
     setSaveStatus('🟢 ' + file.name, '#a5d6a7');
@@ -1417,6 +1632,32 @@ function handleFiles(ev) {
   ev.target.value = '';
 }
 
+// Wandelt eine Excel-Zelle in ein ISO-Datum (YYYY-MM-DD) um, oder null wenn nicht erkennbar.
+// Deckt echte Excel-Datumsfelder, Excel-Seriennummern UND als Text getipptes TT.MM.JJJJ ab
+// (letzteres wird sonst stillschweigend übersprungen, wenn die Spalte nicht als Datum formatiert ist).
+function parseExcelDatum(raw) {
+  if (raw instanceof Date) {
+    return isNaN(raw.getTime()) ? null : raw.toISOString().slice(0,10);
+  }
+  if (typeof raw === 'number') {
+    const d = new Date(Math.round((raw-25569)*86400*1000));
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0,10);
+  }
+  if (raw) {
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/);
+    if (m) {
+      let [, day, mon, yr] = m;
+      if (yr.length === 2) yr = (parseInt(yr,10) < 70 ? '20' : '19') + yr;
+      const iso = `${yr.padStart(4,'0')}-${mon.padStart(2,'0')}-${day.padStart(2,'0')}`;
+      const check = new Date(iso);
+      if (!isNaN(check.getTime())) return iso;
+    }
+  }
+  return null;
+}
+
 function processExcelFile(file) {
   const reader = new FileReader();
   reader.onload = e => {
@@ -1439,14 +1680,14 @@ function processExcelFile(file) {
       const tName  = wb.SheetNames.find(n => /termin|plan/i.test(n));
       const tSheet = wb.Sheets[tName];
       const termine = [];
+      let unparsedDates = 0;
       if (tSheet) {
         XLSX.utils.sheet_to_json(tSheet, {header:1, cellDates:true}).forEach((r,i) => {
           if (i === 0) return;
-          let datum = null;
-          if (r[0] instanceof Date) datum = r[0].toISOString().slice(0,10);
-          else if (typeof r[0] === 'number') datum = new Date(Math.round((r[0]-25569)*86400*1000)).toISOString().slice(0,10);
-          else if (r[0]) datum = String(r[0]).slice(0,10);
-          if (datum && /^\d{4}-\d{2}-\d{2}$/.test(datum)) termine.push({datum, thema:String(r[1]||'').trim()});
+          if (r[0] === undefined || r[0] === null || r[0] === '') return; // leere Zeile
+          const datum = parseExcelDatum(r[0]);
+          if (datum) termine.push({datum, thema:String(r[1]||'').trim()});
+          else unparsedDates++;
         });
       }
 
@@ -1455,6 +1696,7 @@ function processExcelFile(file) {
       showModal(`<h2>Excel importiert</h2>
         <div class="field"><label>Klassenname</label><input id="m-icn" value="${esc(suggestedName)}"></div>
         <p class="info-txt">Erkannt: ${schueler.length} Schüler · ${termine.length} Termine</p>
+        ${unparsedDates ? `<p style="color:#e65100;font-size:12px">⚠ ${unparsedDates} Zeile${unparsedDates>1?'n':''} in der Planung hatte${unparsedDates>1?'n':''} ein nicht erkennbares Datum und wurde${unparsedDates>1?'n':''} nicht importiert. Bitte die Datumsspalte in Excel als Datum formatieren.</p>` : ''}
         ${(!schueler.length && !termine.length) ? '<p style="color:#c62828;font-size:12px">⚠ Keine Daten erkannt. Die Datei benötigt ein Blatt mit "Schüler" oder "Kursliste" und ggf. "Planung" oder "Termine".</p>' : ''}
         <div class="mbtns">
           <button class="btn btn-gray" onclick="closeModal()">Abbrechen</button>
@@ -1478,7 +1720,9 @@ function doImport() {
     sortTer.forEach(t => { if (!k.termine.some(x=>x.datum===t.datum)) k.termine.push(t); });
     k.schueler.sort((a,b)=>a.nachname.localeCompare(b.nachname,'de'));
     k.termine.sort((a,b)=>a.datum.localeCompare(b.datum));
-    state.cur = name; save(); updateDropdown(); renderAll();
+    state.cur = name;
+    ensureSchuelerIds(k);
+    save(); updateDropdown(); renderAll();
   } else {
     addNewClass(name, sortSch, sortTer);
   }
@@ -1488,6 +1732,21 @@ function doImport() {
 // ══════════════════════════════════════════
 // EXCEL EXPORT
 // ══════════════════════════════════════════
+// Liefert einen für das Workbook eindeutigen Excel-Blattnamen (max. 31 Zeichen).
+// Excel erlaubt keine doppelten Blattnamen - ohne diese Prüfung stürzt der Export ab,
+// sobald z.B. zwei Klassenarbeiten gleich (oder nach Kürzung gleich) heißen.
+function uniqueSheetName(wb, name) {
+  let base = String(name || 'Blatt').replace(/[\\/?*[\]:]/g, ' ').trim().slice(0, 31) || 'Blatt';
+  if (!wb.SheetNames.includes(base)) return base;
+  let i = 2, candidate;
+  do {
+    const suffix = ' (' + i + ')';
+    candidate = base.slice(0, 31 - suffix.length) + suffix;
+    i++;
+  } while (wb.SheetNames.includes(candidate));
+  return candidate;
+}
+
 function exportExcel() {
   const k = cls(); if (!k) { alert('Keine Klasse ausgewählt.'); return; }
   const wb     = XLSX.utils.book_new();
@@ -1495,50 +1754,50 @@ function exportExcel() {
 
   // Anwesenheit
   const anwHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)+(t.thema?' – '+t.thema:'')), 'Fehltage'];
-  const anwRows = k.schueler.map((s,si) => {
+  const anwRows = k.schueler.map(s => {
     let fehlt=0;
     const cells = sorted.map(t => {
-      const st=(k.anwesenheit[si]||{})[t.datum];
+      const st=(k.anwesenheit[s.id]||{})[t.datum];
       if(st==='E'||st==='Q'||st==='U')fehlt++;
       return {A:'Anwesend',E:'Entschuldigt',Q:'Offen (?)',U:'Unentschuldigt',F:'Ausfall'}[st]||'';
     });
     return [`${s.nachname}, ${s.vorname}`, ...cells, fehlt];
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([anwHead,...anwRows]), 'Anwesenheit');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([anwHead,...anwRows]), uniqueSheetName(wb, 'Anwesenheit'));
 
   // Mündlich & Kursarbeit
   const obEx = isOberstufe(k.name);
-  function catAvg(catObj, si) {
-    const entries = Object.values(catObj[si] || {});
+  function catAvg(catObj, sid) {
+    const entries = Object.values(catObj[sid] || {});
     if (!entries.length) return null;
     const vals = obEx ? entries : entries.map(r => SM_GRADES[r]);
     return vals.reduce((a,b)=>a+b,0) / vals.length;
   }
   const muHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
-  const muRows = k.schueler.map((s,si) => {
+  const muRows = k.schueler.map(s => {
     const cells = sorted.map(t => {
-      const r=(k.muendlich[si]||{})[t.datum];
+      const r=(k.muendlich[s.id]||{})[t.datum];
       if (r===undefined) return '';
       return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
     });
-    const avg   = catAvg(k.muendlich, si);
+    const avg   = catAvg(k.muendlich, s.id);
     const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
     return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([muHead,...muRows]), 'Mündliche Mitarbeit');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([muHead,...muRows]), uniqueSheetName(wb, 'Mündliche Mitarbeit'));
 
   const kaHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
-  const kaRows = k.schueler.map((s,si) => {
+  const kaRows = k.schueler.map(s => {
     const cells = sorted.map(t => {
-      const r=((k.kursarbeit||{})[si]||{})[t.datum];
+      const r=((k.kursarbeit||{})[s.id]||{})[t.datum];
       if (r===undefined) return '';
       return obEx ? `${r} (${ptsToNoteStr(r)})` : SM_LABELS[r];
     });
-    const avg   = catAvg(k.kursarbeit || {}, si);
+    const avg   = catAvg(k.kursarbeit || {}, s.id);
     const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
     return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([kaHead,...kaRows]), 'Kursarbeit');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([kaHead,...kaRows]), uniqueSheetName(wb, 'Kursarbeit'));
 
   // Notenübersicht (Halbjahresnoten + Jahresnote)
   function fmtExportNote(g) {
@@ -1547,28 +1806,29 @@ function exportExcel() {
     return `${g.toFixed(1)} (${roundNoteGuenstig(g)})`;
   }
   const noHead = ['Name', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
-  const noRows = k.schueler.map((s,si) => {
-    const hj1 = hjNote(si, 1), hj2 = hjNote(si, 2);
+  const noRows = k.schueler.map(s => {
+    const hj1 = hjNote(s.id, 1), hj2 = hjNote(s.id, 2);
     const row = [`${s.nachname}, ${s.vorname}`, fmtExportNote(hj1), fmtExportNote(hj2)];
-    if (!obEx) row.push(fmtExportNote(jahresnote(si)));
+    if (!obEx) row.push(fmtExportNote(jahresnote(s.id)));
     return row;
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([noHead,...noRows]), 'Notenübersicht');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([noHead,...noRows]), uniqueSheetName(wb, 'Notenübersicht'));
 
   // Klassenarbeiten
   k.arbeiten.forEach(arb => {
     const maxT = arb.aufgaben.reduce((s,a)=>s+(parseFloat(a.punkte)||0),0);
     const head = ['Name', ...arb.aufgaben.map(a=>`${a.name} (${a.punkte}P)`), 'Gesamt', '%', 'Note'];
-    const rows = k.schueler.map((s,si) => {
-      const ergs  = arb.ergebnisse[si]||[];
+    const rows = k.schueler.map(s => {
+      const ergs  = arb.ergebnisse[s.id]||[];
       const earn  = ergs.reduce((s,p)=>s+(parseFloat(p)||0),0);
       const pct   = maxT ? (earn/maxT*100).toFixed(1) : '';
-      return [`${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, arbeitGrade(arb,si)||''];
+      return [`${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, arbeitGrade(arb,s.id)||''];
     });
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...rows]), arb.name.slice(0,31));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...rows]), uniqueSheetName(wb, arb.name));
   });
 
-  XLSX.writeFile(wb, `${k.name}_Klassenmanager_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const safeName = k.name.replace(/[\\/:*?"<>|]/g, '-');
+  XLSX.writeFile(wb, `${safeName}_Klassenmanager_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // ══════════════════════════════════════════
