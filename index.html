@@ -426,8 +426,8 @@ function renderAnwesenheit(k) {
         ⚠ Noch keine Unterrichtstermine – Tabelle erscheint sobald du einen Termin hinzufügst.
       </div>
       <table><thead><tr><th class="col-name">Name</th></tr></thead><tbody>`;
-    k.schueler.forEach(s => {
-      h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')">${esc(s.nachname)}, ${esc(s.vorname)}</td></tr>`;
+    k.schueler.forEach((s, i) => {
+      h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td></tr>`;
     });
     h += `</tbody></table></div>`;
     wrap.innerHTML = h;
@@ -451,8 +451,8 @@ function renderAnwesenheit(k) {
   });
   h += '<th style="min-width:60px;text-align:center">Fehltage</th></tr></thead><tbody>';
 
-  k.schueler.forEach(s => {
-    h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
+  k.schueler.forEach((s, i) => {
+    h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let fehlt = 0;
     sorted.forEach(t => {
       const st = (k.anwesenheit[s.id] || {})[t.datum] || '';
@@ -745,8 +745,8 @@ function renderMuendlich(k) {
     return row;
   }
 
-  k.schueler.forEach(s => {
-    h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
+  k.schueler.forEach((s, i) => {
+    h += `<tr><td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let sum = 0, cnt = 0;
     sorted.forEach(t => {
       const rm = (k.muendlich[s.id]  || {})[t.datum];
@@ -909,10 +909,10 @@ function renderNoten(k) {
 
   if (noteView === 'jahr') {
     h = `<table><thead><tr><th class="col-name">Name</th><th>Note 1. Halbjahr</th><th>Note 2. Halbjahr</th><th>Jahresnote</th></tr></thead><tbody>`;
-    k.schueler.forEach(s => {
+    k.schueler.forEach((s, i) => {
       const hj1 = hjNote(s.id, 1), hj2 = hjNote(s.id, 2), jn = jahresnote(s.id);
       h += `<tr>
-        <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
+        <td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>
         <td style="text-align:center">${fmtNoteFinal(hj1, ob)}</td>
         <td style="text-align:center">${fmtNoteFinal(hj2, ob)}</td>
         <td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(jn, ob)}</td>
@@ -926,12 +926,12 @@ function renderNoten(k) {
     arbHJ.forEach(a => h += `<th>${esc(a.name)}</th>`);
     h += `<th>Note ${hj}. Halbjahr</th></tr></thead><tbody>`;
 
-    k.schueler.forEach(s => {
+    k.schueler.forEach((s, i) => {
       const mAvg = mitarbeitAvgGrade(s.id, hj);
       const aGrades = arbHJ.map(a => arbeitGrade(a, s.id));
       const final = hjNote(s.id, hj);
       h += `<tr>
-        <td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>
+        <td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>
         <td style="text-align:center">${fmtNoteG(mAvg, ob)}</td>`;
       aGrades.forEach(g => h += `<td style="text-align:center">${fmtNoteG(g, ob)}</td>`);
       h += `<td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(final, ob)}</td></tr>`;
@@ -1036,11 +1036,11 @@ function renderArbeiten(k) {
     <th style="text-align:center">Note</th>
   </tr></thead><tbody>`;
 
-  k.schueler.forEach(s => {
+  k.schueler.forEach((s, i) => {
     const sid = s.id;
     if (!arb.ergebnisse[sid]) arb.ergebnisse[sid] = [];
     let earned = 0;
-    h += `<tr><td class="col-name">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
+    h += `<tr><td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     arb.aufgaben.forEach((auf, oi) => {
       const v = arb.ergebnisse[sid][oi] !== undefined ? arb.ergebnisse[sid][oi] : '';
       if (v !== '') earned += parseFloat(v) || 0;
@@ -1803,15 +1803,15 @@ function exportExcel() {
   const sorted = [...k.termine].sort((a,b)=>a.datum.localeCompare(b.datum));
 
   // Anwesenheit
-  const anwHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)+(t.thema?' – '+t.thema:'')), 'Fehltage'];
-  const anwRows = k.schueler.map(s => {
+  const anwHead = ['Nr.', 'Name', ...sorted.map(t=>fmtDate(t.datum)+(t.thema?' – '+t.thema:'')), 'Fehltage'];
+  const anwRows = k.schueler.map((s, i) => {
     let fehlt=0;
     const cells = sorted.map(t => {
       const st=(k.anwesenheit[s.id]||{})[t.datum];
       if(st==='E'||st==='Q'||st==='U')fehlt++;
       return {A:'Anwesend',E:'Entschuldigt',Q:'Offen (?)',U:'Unentschuldigt',F:'Ausfall'}[st]||'';
     });
-    return [`${s.nachname}, ${s.vorname}`, ...cells, fehlt];
+    return [i+1, `${s.nachname}, ${s.vorname}`, ...cells, fehlt];
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([anwHead,...anwRows]), uniqueSheetName(wb, 'Anwesenheit'));
 
@@ -1823,8 +1823,8 @@ function exportExcel() {
     const vals = obEx ? entries : entries.map(r => SM_GRADES[r]);
     return vals.reduce((a,b)=>a+b,0) / vals.length;
   }
-  const muHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
-  const muRows = k.schueler.map(s => {
+  const muHead = ['Nr.', 'Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
+  const muRows = k.schueler.map((s, i) => {
     const cells = sorted.map(t => {
       const r=(k.muendlich[s.id]||{})[t.datum];
       if (r===undefined) return '';
@@ -1832,12 +1832,12 @@ function exportExcel() {
     });
     const avg   = catAvg(k.muendlich, s.id);
     const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
-    return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
+    return [i+1, `${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([muHead,...muRows]), uniqueSheetName(wb, 'Mündliche Mitarbeit'));
 
-  const kaHead = ['Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
-  const kaRows = k.schueler.map(s => {
+  const kaHead = ['Nr.', 'Name', ...sorted.map(t=>fmtDate(t.datum)), obEx ? 'Ø Punkte' : 'Ø Note'];
+  const kaRows = k.schueler.map((s, i) => {
     const cells = sorted.map(t => {
       const r=((k.kursarbeit||{})[s.id]||{})[t.datum];
       if (r===undefined) return '';
@@ -1845,7 +1845,7 @@ function exportExcel() {
     });
     const avg   = catAvg(k.kursarbeit || {}, s.id);
     const avgStr = avg!==null ? (obEx ? `${avg.toFixed(1)} (${ptsToNoteStr(avg)})` : avg.toFixed(1)) : '';
-    return [`${s.nachname}, ${s.vorname}`, ...cells, avgStr];
+    return [i+1, `${s.nachname}, ${s.vorname}`, ...cells, avgStr];
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([kaHead,...kaRows]), uniqueSheetName(wb, 'Kursarbeit'));
 
@@ -1855,10 +1855,10 @@ function exportExcel() {
     if (obEx) { const p = Math.round(g); return `${g.toFixed(1)} (${ptsToNoteStr(p)})`; }
     return `${g.toFixed(1)} (${roundNoteGuenstig(g)})`;
   }
-  const noHead = ['Name', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
-  const noRows = k.schueler.map(s => {
+  const noHead = ['Nr.', 'Name', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
+  const noRows = k.schueler.map((s, i) => {
     const hj1 = hjNote(s.id, 1), hj2 = hjNote(s.id, 2);
-    const row = [`${s.nachname}, ${s.vorname}`, fmtExportNote(hj1), fmtExportNote(hj2)];
+    const row = [i+1, `${s.nachname}, ${s.vorname}`, fmtExportNote(hj1), fmtExportNote(hj2)];
     if (!obEx) row.push(fmtExportNote(jahresnote(s.id)));
     return row;
   });
@@ -1867,12 +1867,12 @@ function exportExcel() {
   // Klassenarbeiten
   k.arbeiten.forEach(arb => {
     const maxT = arb.aufgaben.reduce((s,a)=>s+(parseFloat(a.punkte)||0),0);
-    const head = ['Name', ...arb.aufgaben.map(a=>`${a.name} (${a.punkte}P)`), 'Gesamt', '%', 'Note'];
-    const rows = k.schueler.map(s => {
+    const head = ['Nr.', 'Name', ...arb.aufgaben.map(a=>`${a.name} (${a.punkte}P)`), 'Gesamt', '%', 'Note'];
+    const rows = k.schueler.map((s, i) => {
       const ergs  = arb.ergebnisse[s.id]||[];
       const earn  = ergs.reduce((s,p)=>s+(parseFloat(p)||0),0);
       const pct   = maxT ? (earn/maxT*100).toFixed(1) : '';
-      return [`${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, arbeitGrade(arb,s.id)||''];
+      return [i+1, `${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, arbeitGrade(arb,s.id)||''];
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...rows]), uniqueSheetName(wb, arb.name));
   });
