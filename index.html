@@ -154,7 +154,9 @@ tbody tr:hover .col-name{background:#fafafa}
     </div>
     <div id="anw-selbar" style="display:none;background:#e8eaf6;border-radius:6px;padding:6px 12px;margin-bottom:8px;align-items:center;gap:10px;font-size:12.5px">
       <span id="anw-selcount">0 ausgewählt</span>
+      <button class="btn btn-sm btn-gray" onclick="selectAllAnwCells()">☑ Alle auswählen</button>
       <button class="btn btn-sm btn-blue" onclick="showBulkStatusPopup(event)">Status setzen</button>
+      <button class="btn btn-sm" style="background:#eceff1;color:#546e7a" onclick="applyBulkStatus('F')" title="Auswahl als Unterrichtsausfall markieren">— Ausfall</button>
       <button class="btn btn-sm btn-gray" onclick="clearAnwSel()">Auswahl aufheben</button>
     </div>
     <div id="anw-wrap" class="tbl-wrap"></div>
@@ -425,11 +427,7 @@ function renderAnwesenheit(k) {
       </div>
       <table><thead><tr><th class="col-name">Name</th></tr></thead><tbody>`;
     k.schueler.forEach(s => {
-      h += `<tr><td class="col-name">
-        <input class="name-inp" style="width:76px" value="${esc(s.nachname)}" onchange="updateSchuelerName('${s.id}','nachname',this.value)">
-        <input class="name-inp" style="width:64px" value="${esc(s.vorname)}" onchange="updateSchuelerName('${s.id}','vorname',this.value)">
-        <button class="btn btn-sm" style="margin-left:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler('${s.id}')" title="Schüler löschen">×</button>
-      </td></tr>`;
+      h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')">${esc(s.nachname)}, ${esc(s.vorname)}</td></tr>`;
     });
     h += `</tbody></table></div>`;
     wrap.innerHTML = h;
@@ -440,21 +438,21 @@ function renderAnwesenheit(k) {
   let h = '<table><thead><tr><th class="col-name">Name</th>';
 
   sorted.forEach(t => {
+    let colSel = '';
+    if (anwSelMode) {
+      const all = k.schueler.length > 0 && k.schueler.every(s => anwSel.has(s.id + '|' + t.datum));
+      colSel = `<input type="checkbox" ${all?'checked':''} title="Ganze Spalte auswählen" style="vertical-align:middle;margin-right:3px" onclick="event.stopPropagation();toggleAnwColumn('${t.datum}')">`;
+    }
     h += `<th style="min-width:92px">
-      <div>${fmtDate(t.datum)}</div>
+      <div>${colSel}${fmtDate(t.datum)}</div>
       <input class="name-inp" style="width:84px;font-weight:400;font-size:10.5px;text-align:center" value="${esc(t.thema)}" placeholder="Thema" title="Thema der Stunde" onchange="updateTerminThema('${t.datum}',this.value)">
-      <button class="btn btn-sm" style="margin-top:3px;background:#eceff1;color:#546e7a" onclick="ausfallColumn('${t.datum}')">Ausfall</button>
-      <button class="btn btn-sm" style="margin-top:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteTermin('${t.datum}')">×</button>
+      <button class="btn btn-sm" style="margin-top:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteTermin('${t.datum}')" title="Termin löschen">×</button>
     </th>`;
   });
   h += '<th style="min-width:60px;text-align:center">Fehltage</th></tr></thead><tbody>';
 
   k.schueler.forEach(s => {
-    h += `<tr><td class="col-name">
-      <input class="name-inp" style="width:76px" value="${esc(s.nachname)}" onchange="updateSchuelerName('${s.id}','nachname',this.value)">
-      <input class="name-inp" style="width:64px" value="${esc(s.vorname)}" onchange="updateSchuelerName('${s.id}','vorname',this.value)">
-      <button class="btn btn-sm" style="margin-left:2px;background:#ffebee;color:#c62828" onclick="confirmDeleteSchueler('${s.id}')" title="Schüler löschen">×</button>
-    </td>`;
+    h += `<tr><td class="col-name" style="cursor:pointer" title="Klicken für Bearbeiten/Löschen" onclick="showSchuelerPopup(event,'${s.id}')">${esc(s.nachname)}, ${esc(s.vorname)}</td>`;
     let fehlt = 0;
     sorted.forEach(t => {
       const st = (k.anwesenheit[s.id] || {})[t.datum] || '';
@@ -604,23 +602,75 @@ function applyBulkStatus(status) {
   save(); updateAnwSelBar(); renderAnwesenheit(k);
 }
 
-function ausfallColumn(datum) {
+// Ganze Termin-Spalte an-/abwählen (im Mehrfachauswahl-Modus)
+function toggleAnwColumn(datum) {
   const k = cls(); if (!k) return;
+  const all = k.schueler.length > 0 && k.schueler.every(s => anwSel.has(s.id + '|' + datum));
   k.schueler.forEach(s => {
-    if (!k.anwesenheit[s.id]) k.anwesenheit[s.id] = {};
-    k.anwesenheit[s.id][datum] = 'F';
+    const key = s.id + '|' + datum;
+    if (all) anwSel.delete(key); else anwSel.add(key);
   });
-  save(); renderAnwesenheit(k);
+  updateAnwSelBar(); renderAnwesenheit(k);
 }
 
-function updateSchuelerName(sid, field, value) {
+function selectAllAnwCells() {
   const k = cls(); if (!k) return;
-  const v = value.trim();
-  if (!v) { renderAll(); return; }
-  const s = k.schueler.find(x => x.id === sid);
-  if (!s) return;
-  s[field] = v;
-  save(); renderAll();
+  const total = k.schueler.length * k.termine.length;
+  const allSelected = total > 0 && anwSel.size >= total;
+  anwSel.clear();
+  if (!allSelected) {
+    k.schueler.forEach(s => k.termine.forEach(t => anwSel.add(s.id + '|' + t.datum)));
+  }
+  updateAnwSelBar(); renderAnwesenheit(k);
+}
+
+// Klick auf den Namen: kleines Menü mit Bearbeiten/Löschen
+function showSchuelerPopup(ev, sid) {
+  ev.stopPropagation();
+  closePopup();
+  const k = cls(); if (!k) return;
+  const s = k.schueler.find(x => x.id === sid); if (!s) return;
+  const p = document.createElement('div');
+  p.className = 'popup';
+  const r = ev.currentTarget.getBoundingClientRect();
+  p.style.top  = Math.min(r.bottom + 4, window.innerHeight - 110) + 'px';
+  p.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 190)) + 'px';
+  const bEdit = document.createElement('button');
+  bEdit.textContent = '✏️ Namen bearbeiten';
+  bEdit.style.background = '#e8eaf6'; bEdit.style.color = '#1a237e';
+  bEdit.onclick = e2 => { e2.stopPropagation(); closePopup(); openEditSchuelerModal(sid); };
+  const bDel = document.createElement('button');
+  bDel.textContent = '🗑 Schüler löschen';
+  bDel.style.background = '#ffebee'; bDel.style.color = '#c62828';
+  bDel.onclick = e2 => { e2.stopPropagation(); closePopup(); confirmDeleteSchueler(sid); };
+  p.appendChild(bEdit); p.appendChild(bDel);
+  document.body.appendChild(p);
+  _popup = p;
+  setTimeout(() => document.addEventListener('click', closePopup, {once:true}), 0);
+}
+
+function openEditSchuelerModal(sid) {
+  const k = cls(); if (!k) return;
+  const s = k.schueler.find(x => x.id === sid); if (!s) return;
+  showModal(`<h2>Namen bearbeiten</h2>
+    <div class="field"><label>Nachname</label><input id="m-en" value="${esc(s.nachname)}" onkeydown="if(event.key==='Enter')document.getElementById('m-ev').focus()"></div>
+    <div class="field"><label>Vorname</label><input id="m-ev" value="${esc(s.vorname)}" onkeydown="if(event.key==='Enter')doEditSchueler('${sid}')"></div>
+    <div class="mbtns">
+      <button class="btn btn-gray" onclick="closeModal()">Abbrechen</button>
+      <button class="btn btn-blue" onclick="doEditSchueler('${sid}')">Speichern</button>
+    </div>`);
+}
+
+function doEditSchueler(sid) {
+  const k = cls(); if (!k) return;
+  const s = k.schueler.find(x => x.id === sid); if (!s) return;
+  const nn = document.getElementById('m-en').value.trim();
+  const vn = document.getElementById('m-ev').value.trim();
+  if (!nn) { alert('Der Nachname darf nicht leer sein.'); return; }
+  s.nachname = nn;
+  s.vorname  = vn;
+  k.schueler.sort((a,b) => a.nachname.localeCompare(b.nachname,'de'));
+  save(); renderAll(); closeModal();
 }
 
 function confirmDeleteSchueler(sid) {
