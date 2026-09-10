@@ -134,6 +134,7 @@ tbody tr:hover .col-name{background:#fafafa}
   <button data-tab="muendlich" onclick="switchTab(this)">Mitarbeit</button>
   <button data-tab="noten" onclick="switchTab(this)">Notenübersicht</button>
   <button data-tab="arbeiten" onclick="switchTab(this)">Klassenarbeiten</button>
+  <button data-tab="notizen" onclick="switchTab(this)">Notizen</button>
   <button data-tab="gruppen" onclick="switchTab(this)">Gruppen</button>
 </nav>
 
@@ -191,11 +192,30 @@ tbody tr:hover .col-name{background:#fafafa}
 
   <div id="tab-arbeiten" class="tab-panel">
     <div class="toolbar">
-      <h3>Klassenarbeiten</h3>
-      <button class="btn btn-green" onclick="addArbeit()">+ Arbeit hinzufügen</button>
+      <h3>Klassenarbeiten &amp; Tests</h3>
+      <button class="btn btn-green" onclick="addArbeit('arbeit')">+ Arbeit</button>
+      <button class="btn btn-sm" style="background:#00695c;color:#fff;padding:6px 13px;font-size:13px" onclick="addArbeit('test')" title="Test – zählt in die mündliche Note statt in den schriftlichen Anteil">+ Test</button>
     </div>
     <div id="arbeit-pills" class="arbeit-pills"></div>
     <div id="arbeit-body"></div>
+  </div>
+
+  <div id="tab-notizen" class="tab-panel">
+    <div class="toolbar">
+      <h3 id="nz-titel">Notizen</h3>
+      <span id="nz-tools"></span>
+    </div>
+    <div id="nz-pills" class="arbeit-pills"></div>
+    <div id="nz-selbar" style="display:none;background:#e8eaf6;border-radius:6px;padding:6px 12px;margin-bottom:8px;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px">
+      <span id="nz-selcount">0 ausgewählt</span>
+      <button class="btn btn-sm btn-gray" onclick="selectAllMatCells()">☑ Alle auswählen</button>
+      <button class="btn btn-sm" style="background:#fff3e0;color:#e65100" onclick="applyMaterial('H')">📕 Hausaufgaben</button>
+      <button class="btn btn-sm" style="background:#fff3e0;color:#e65100" onclick="applyMaterial('M')">🎒 Material</button>
+      <button class="btn btn-sm" style="background:#ffebee;color:#c62828" onclick="applyMaterial('HM')">Beides</button>
+      <button class="btn btn-sm" style="background:#e8f5e9;color:#2e7d32" onclick="applyMaterial('')">↩ Zurücksetzen</button>
+      <button class="btn btn-sm btn-gray" onclick="clearMatSel()">Auswahl aufheben</button>
+    </div>
+    <div id="nz-wrap"></div>
   </div>
 
   <div id="tab-gruppen" class="tab-panel">
@@ -264,7 +284,7 @@ let muSelMode = false;
 let muSel = new Set();
 
 // Gruppen: aktuelle Würfelung (nicht persistiert)
-let grState = { n: 4, datum: '', filterAbwesend: true };
+let grState = { n: 4, groesse: 4, modus: 'anzahl', datum: '', filterAbwesend: true };
 let grGroups = null;
 
 function loadState() {
@@ -326,7 +346,15 @@ function cls() {
     if (!k.anwesenheit) k.anwesenheit = {};
     if (!k.muendlich)   k.muendlich   = {};
     if (!k.kursarbeit)  k.kursarbeit  = {};
+    if (!Array.isArray(k.kommentare)) k.kommentare = [];   // Logbuch: [{id, datum, sid|null, text}]
+    if (!k.material)    k.material    = {};                // {sid: {datum: 'H'|'M'|'HM'}}
     if (!k.gewichtung)  k.gewichtung  = { m: 60, a: 40 };
+    // Test-Anteil INNERHALB der Mitarbeitsnote (Standard 5% der mündlichen Note = 3% der
+    // Gesamtnote). Solange kein Test existiert, bleibt die Note rechnerisch unverändert.
+    if (typeof k.gewichtung.t !== 'number') k.gewichtung.t = 5;
+    // Bestehende Klassenarbeiten sind immer vom Typ 'arbeit' – nur neu angelegte
+    // können als 'test' markiert werden. Damit ändert sich für Altdaten nichts.
+    k.arbeiten.forEach(a => { if (a.typ !== 'test') a.typ = 'arbeit'; });
     // Einmalige Korrektur: der alte Default stand fälschlich auf 40% Mitarbeit / 60% schriftlich –
     // richtig ist 60% Mitarbeit (mündlich + Kursarbeit) / 40% schriftlich. Nur unkorrigierte
     // Klassen mit exakt dem alten Default werden gedreht; danach nie wieder angefasst,
@@ -373,6 +401,7 @@ function switchClass(name) {
   grGroups = null; grState.datum = '';
   anwSelMode = false; anwSel.clear();
   muSelMode = false; muSel.clear();
+  matSelMode = false; matSel.clear(); nzFilterSid = '';
   save(); updateDropdown(); renderAll();
 }
 
@@ -385,8 +414,10 @@ function addNewClass(name, schueler, termine) {
     anwesenheit: {},
     muendlich:   {},
     kursarbeit:  {},
+    kommentare:  [],
+    material:    {},
     arbeiten:    [],
-    gewichtung:  { m: 60, a: 40 },
+    gewichtung:  { m: 60, a: 40, t: 5 },
     gwKorrigiert: true
   };
   state.cur = name;
@@ -422,6 +453,7 @@ function renderAll() {
   renderMuendlich(k);
   renderNoten(k);
   renderArbeiten(k);
+  renderNotizen(k);
   renderGruppen(k);
 }
 
@@ -699,8 +731,10 @@ function confirmDeleteSchueler(sid) {
   delete k.anwesenheit[sid];
   delete k.muendlich[sid];
   delete k.kursarbeit[sid];
+  delete k.material[sid];
+  k.kommentare = k.kommentare.filter(e => e.sid !== sid);
   k.arbeiten.forEach(arb => { if (arb.ergebnisse) delete arb.ergebnisse[sid]; });
-  anwSel.clear();
+  anwSel.clear(); matSel.clear();
   save(); renderAll();
 }
 
@@ -721,8 +755,9 @@ function confirmDeleteTermin(datum) {
     if (k.anwesenheit[s.id]) delete k.anwesenheit[s.id][datum];
     if (k.muendlich[s.id])   delete k.muendlich[s.id][datum];
     if (k.kursarbeit[s.id])  delete k.kursarbeit[s.id][datum];
+    if (k.material[s.id])    delete k.material[s.id][datum];
   });
-  anwSel.clear();
+  anwSel.clear(); matSel.clear();
   save(); renderAll();
 }
 
@@ -972,12 +1007,37 @@ function arbeitGrade(arb, sid) {
   return 6;
 }
 
+// Durchschnitt aller Tests eines Halbjahrs (Typ 'test' im Klassenarbeiten-Reiter).
+// Mehrere Tests werden erst untereinander gemittelt; dieser eine Wert zählt dann
+// den Test-Anteil der Mitarbeitsnote (nicht jeder Test einzeln).
+function testAvgGrade(sid, hj) {
+  const k = cls(); if (!k) return null;
+  const tests = k.arbeiten.filter(a => a.typ === 'test' && (!hj || getHalbjahr(a.datum) === hj));
+  const g = tests.map(a => arbeitGrade(a, sid)).filter(v => v !== null);
+  return g.length ? g.reduce((a,b)=>a+b,0)/g.length : null;
+}
+
+// Gesamte Mitarbeitsnote = mündlich+Kursarbeit (gepoolt) und Tests, gewichtet mit
+// gewichtung.t (% INNERHALB der Mitarbeit). Fehlt eine der beiden Seiten, trägt die
+// andere allein – dadurch bleibt die Note von Klassen ohne Tests exakt unverändert.
+function mitarbeitGesamt(sid, hj) {
+  const k = cls(); if (!k) return null;
+  const tG = Math.min(100, Math.max(0, k.gewichtung.t || 0));
+  const pool = mitarbeitAvgGrade(sid, hj);
+  const test = testAvgGrade(sid, hj);
+  if (pool !== null && test !== null) return (pool*(100-tG) + test*tG) / 100;
+  if (pool !== null) return pool;
+  if (test !== null) return test;
+  return null;
+}
+
 // Note für ein Halbjahr (mG/aG-Gewichtung wie im Gewichtung-Dialog, gilt für beide Halbjahre gleich)
 function hjNote(sid, hj) {
   const k = cls(); if (!k) return null;
   const mG = k.gewichtung.m, aG = k.gewichtung.a;
-  const mAvg = mitarbeitAvgGrade(sid, hj);
-  const arbHJ = k.arbeiten.filter(a => getHalbjahr(a.datum) === hj);
+  const mAvg = mitarbeitGesamt(sid, hj);
+  // Nur echte Klassenarbeiten zählen in den schriftlichen Anteil – Tests laufen über die Mitarbeit
+  const arbHJ = k.arbeiten.filter(a => a.typ !== 'test' && getHalbjahr(a.datum) === hj);
   const aGrades = arbHJ.map(a => arbeitGrade(a, sid)).filter(g => g !== null);
   const aAvg = aGrades.length ? aGrades.reduce((a,b)=>a+b,0)/aGrades.length : null;
   if (mAvg !== null && aAvg !== null) return (mAvg*mG + aAvg*aG) / (mG+aG);
@@ -1051,18 +1111,34 @@ function renderNoten(k) {
     h += '</tbody></table>';
   } else {
     const hj = noteView === 'hj2' ? 2 : 1;
-    const arbHJ = k.arbeiten.filter(a => getHalbjahr(a.datum) === hj);
-    h = `<table><thead><tr><th class="col-name">Name</th><th>Mitarbeit (${mG}%)</th>`;
+    const tG = k.gewichtung.t || 0;
+    // Tests laufen über die Mitarbeit, echte Klassenarbeiten über den schriftlichen Anteil
+    const arbHJ  = k.arbeiten.filter(a => a.typ !== 'test' && getHalbjahr(a.datum) === hj);
+    const testHJ = k.arbeiten.filter(a => a.typ === 'test' && getHalbjahr(a.datum) === hj);
+    h = `<table><thead><tr><th class="col-name">Name</th>
+      <th title="Mündlich + Kursarbeit${testHJ.length?` (${100-tG}% der Mitarbeit)`:''}">Mündl. + Kursarb.</th>`;
+    if (testHJ.length) {
+      testHJ.forEach(a => h += `<th style="color:#00695c" title="Test – zählt ${tG}% der Mitarbeitsnote">${esc(a.name)}</th>`);
+      h += `<th style="color:#00695c" title="Durchschnitt aller Tests dieses Halbjahrs – zählt ${tG}% der Mitarbeitsnote">Ø Tests (${tG}%)</th>`;
+    }
+    h += `<th title="Mitarbeitsnote gesamt – zählt ${mG}% der Halbjahresnote">Mitarbeit (${mG}%)</th>`;
     arbHJ.forEach(a => h += `<th>${esc(a.name)}</th>`);
     h += `<th>Note ${hj}. Halbjahr</th></tr></thead><tbody>`;
 
     k.schueler.forEach((s, i) => {
-      const mAvg = mitarbeitAvgGrade(s.id, hj);
+      const pool  = mitarbeitAvgGrade(s.id, hj);
+      const tAvg  = testAvgGrade(s.id, hj);
+      const mGes  = mitarbeitGesamt(s.id, hj);
       const aGrades = arbHJ.map(a => arbeitGrade(a, s.id));
       const final = hjNote(s.id, hj);
       h += `<tr>
         <td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>
-        <td style="text-align:center">${fmtNoteG(mAvg, ob)}</td>`;
+        <td style="text-align:center">${fmtNoteG(pool, ob)}</td>`;
+      if (testHJ.length) {
+        testHJ.forEach(a => h += `<td style="text-align:center">${fmtNoteG(arbeitGrade(a, s.id), ob)}</td>`);
+        h += `<td style="text-align:center;background:#e0f2f1">${fmtNoteG(tAvg, ob)}</td>`;
+      }
+      h += `<td style="text-align:center">${fmtNoteG(mGes, ob)}</td>`;
       aGrades.forEach(g => h += `<td style="text-align:center">${fmtNoteG(g, ob)}</td>`);
       h += `<td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(final, ob)}</td></tr>`;
     });
@@ -1075,17 +1151,27 @@ function renderNoten(k) {
 // ══════════════════════════════════════════
 // KLASSENARBEITEN
 // ══════════════════════════════════════════
-function addArbeit() {
+function addArbeit(typ) {
   const k = cls(); if (!k) { alert('Bitte zuerst eine Klasse wählen.'); return; }
   const ob = isOberstufe(k.name);
+  const istTest = typ === 'test';
+  const anzahl = k.arbeiten.filter(a => (a.typ === 'test') === istTest).length + 1;
   k.arbeiten.push({
-    name: ob ? `Klausur ${k.arbeiten.length + 1}` : `Arbeit ${k.arbeiten.length + 1}`,
+    typ: istTest ? 'test' : 'arbeit',
+    name: istTest ? `Test ${anzahl}` : (ob ? `Klausur ${anzahl}` : `Arbeit ${anzahl}`),
     datum: new Date().toISOString().slice(0,10),
     aufgaben: [{name:'A1', punkte:10}],
     ergebnisse: {},
     notenschluessel: ob ? [...OB_THRESHOLDS] : [90, 75, 60, 45, 30]
   });
   state.curArbeit = k.arbeiten.length - 1;
+  save(); renderArbeiten(k); renderNoten(k);
+}
+
+// Umschalten zwischen Klassenarbeit und Test – ändert nur, in welchen Notentopf das Ergebnis fließt
+function arbSetTyp(ai, typ) {
+  const k = cls(); if (!k) return;
+  k.arbeiten[ai].typ = typ === 'test' ? 'test' : 'arbeit';
   save(); renderArbeiten(k); renderNoten(k);
 }
 
@@ -1101,13 +1187,19 @@ function renderArbeiten(k) {
   }
   if (!k.arbeiten.length) {
     pills.innerHTML = '';
-    body.innerHTML = emptyHtml('Noch keine Klassenarbeit', 'Klicke auf "+ Arbeit hinzufügen".');
+    body.innerHTML = emptyHtml('Noch keine Klassenarbeit', 'Klicke auf "+ Arbeit" oder "+ Test".');
     return;
   }
 
-  pills.innerHTML = k.arbeiten.map((a,i) =>
-    `<span class="pill ${i===state.curArbeit?'active':''}" onclick="switchArbeitPill(${i})">${esc(a.name)}</span>`
-  ).join('');
+  // Tests optisch abgesetzt (türkis), damit sofort klar ist, was in welchen Notentopf zählt
+  pills.innerHTML = k.arbeiten.map((a,i) => {
+    const t = a.typ === 'test';
+    const aktiv = i === state.curArbeit;
+    const stil = t
+      ? (aktiv ? 'background:#00695c;color:#fff;border-color:#00695c' : 'color:#00695c;border-color:#80cbc4')
+      : '';
+    return `<span class="pill ${aktiv?'active':''}" style="${stil}" onclick="switchArbeitPill(${i})">${t?'📝 ':''}${esc(a.name)}</span>`;
+  }).join('');
 
   const ai  = Math.min(state.curArbeit, k.arbeiten.length - 1);
   const arb = k.arbeiten[ai];
@@ -1145,6 +1237,12 @@ function renderArbeiten(k) {
         onchange="arbRename(${ai},this.value)">
       <input type="date" value="${arb.datum||''}" style="border:1.5px solid #e0e0e0;border-radius:6px;padding:5px 8px"
         onchange="arbSetDate(${ai},this.value)">
+      <select style="border:1.5px solid #e0e0e0;border-radius:6px;padding:5px 8px;font-size:12.5px"
+        title="Klassenarbeit zählt in den schriftlichen Anteil, Test in die Mitarbeitsnote"
+        onchange="arbSetTyp(${ai},this.value)">
+        <option value="arbeit" ${arb.typ!=='test'?'selected':''}>${ob?'Klausur':'Klassenarbeit'} → schriftlich (${k.gewichtung.a}%)</option>
+        <option value="test" ${arb.typ==='test'?'selected':''}>Test → mündliche Note (${k.gewichtung.t||0}%)</option>
+      </select>
       <span style="color:#888;font-size:12px">Max: ${maxTotal} Punkte</span>
       <div style="flex:1"></div>
       <button class="btn btn-sm" style="background:#ffebee;color:#c62828" onclick="confirmDeleteArbeit(${ai})">🗑 Löschen</button>
@@ -1266,6 +1364,265 @@ function updateNS(ai, idx, v) {
 }
 
 // ══════════════════════════════════════════
+// NOTIZEN (Kommentar-Logbuch + Material/Hausaufgaben)
+// ══════════════════════════════════════════
+let nzView = 'log';          // 'log' = Kommentar-Logbuch | 'mat' = Material/HA-Matrix
+let nzFilterSid = '';        // Logbuch-Filter auf einen Schüler
+let matSelMode = false;      // Mehrfachauswahl in der Material-Matrix
+let matSel = new Set();
+const MAT_CFG = {
+  H:  {label:'📕', title:'Hausaufgaben vergessen', bg:'#fff3e0', fg:'#e65100'},
+  M:  {label:'🎒', title:'Material vergessen',      bg:'#fff3e0', fg:'#e65100'},
+  HM: {label:'📕🎒', title:'Hausaufgaben und Material vergessen', bg:'#ffebee', fg:'#c62828'},
+};
+
+function switchNzView(v) { nzView = v; matSelMode = false; matSel.clear(); renderNotizen(cls()); }
+
+function renderNotizen(k) {
+  const pills = document.getElementById('nz-pills');
+  const wrap  = document.getElementById('nz-wrap');
+  const tools = document.getElementById('nz-tools');
+  if (!pills || !wrap) return;
+  if (!k) { pills.innerHTML=''; tools.innerHTML=''; wrap.innerHTML = emptyHtml('Keine Klasse gewählt'); updateMatSelBar(); return; }
+  if (!k.schueler.length) { pills.innerHTML=''; tools.innerHTML=''; wrap.innerHTML = emptyHtml('Keine Schüler'); updateMatSelBar(); return; }
+
+  pills.innerHTML = [['log','📝 Kommentare'],['mat','📕 Material / Hausaufgaben']]
+    .map(([id,label]) => `<span class="pill ${nzView===id?'active':''}" onclick="switchNzView('${id}')">${label}</span>`).join('');
+
+  if (nzView === 'log') { tools.innerHTML = `<button class="btn btn-blue" onclick="openKommentarModal()">+ Eintrag</button>`; renderLogbuch(k, wrap); }
+  else                  { tools.innerHTML = `<button id="mat-selbtn" class="btn btn-gray" onclick="toggleMatSelMode()">☑ Mehrfachauswahl</button>`; renderMaterial(k, wrap); }
+  updateMatSelBar();
+}
+
+// ── Kommentar-Logbuch ──────────────────────
+function renderLogbuch(k, wrap) {
+  const eintraege = [...k.kommentare]
+    .filter(e => !nzFilterSid || e.sid === nzFilterSid)
+    .sort((a,b) => (b.datum || '').localeCompare(a.datum || ''));
+
+  const opts = k.schueler.map(s =>
+    `<option value="${s.id}" ${nzFilterSid===s.id?'selected':''}>${esc(s.nachname)}, ${esc(s.vorname)}</option>`).join('');
+  let h = `<div class="card" style="margin-bottom:14px">
+    <label style="font-size:12.5px;color:#555">Filter:
+      <select style="font-size:12px;padding:3px 6px;margin-left:5px" onchange="nzSetFilter(this.value)">
+        <option value="">– alle Einträge –</option>${opts}
+      </select>
+    </label>
+    <span style="font-size:12px;color:#888;margin-left:12px">${eintraege.length} Eintrag${eintraege.length===1?'':'e'}</span>
+  </div>`;
+
+  if (!eintraege.length) {
+    h += emptyHtml('Noch keine Kommentare', 'Über "+ Eintrag" eine Notiz zu einer Stunde festhalten.');
+    wrap.innerHTML = h; return;
+  }
+
+  h += '<div class="tbl-wrap"><table><thead><tr><th style="min-width:90px">Datum</th><th style="min-width:150px">Schüler</th><th style="text-align:left">Kommentar</th><th style="width:70px"></th></tr></thead><tbody>';
+  eintraege.forEach(e => {
+    const s = e.sid ? k.schueler.find(x => x.id === e.sid) : null;
+    const wer = s ? `${esc(s.nachname)}, ${esc(s.vorname)}`
+                  : '<span style="color:#3949ab;font-weight:600">gesamte Klasse</span>';
+    h += `<tr>
+      <td style="text-align:center;white-space:nowrap">${fmtDate(e.datum)}<span style="color:#aaa">${(e.datum||'').slice(0,4)}</span></td>
+      <td>${wer}</td>
+      <td style="white-space:normal;text-align:left">${esc(e.text)}</td>
+      <td style="text-align:center;white-space:nowrap">
+        <button class="btn btn-sm" style="background:#e8eaf6;color:#1a237e" onclick="openKommentarModal('${e.id}')" title="Bearbeiten">✏️</button>
+        <button class="btn btn-sm" style="background:#ffebee;color:#c62828" onclick="deleteKommentar('${e.id}')" title="Löschen">×</button>
+      </td></tr>`;
+  });
+  h += '</tbody></table></div>';
+  wrap.innerHTML = h;
+}
+
+function nzSetFilter(v) { nzFilterSid = v; renderNotizen(cls()); }
+
+function openKommentarModal(id) {
+  const k = cls(); if (!k) return;
+  const e = id ? k.kommentare.find(x => x.id === id) : null;
+  const heute = new Date().toISOString().slice(0,10);
+  const opts = k.schueler.map(s =>
+    `<option value="${s.id}" ${e && e.sid===s.id?'selected':''}>${esc(s.nachname)}, ${esc(s.vorname)}</option>`).join('');
+  showModal(`<h2>${e ? 'Kommentar bearbeiten' : 'Neuer Kommentar'}</h2>
+    <div class="field"><label>Datum</label><input type="date" id="m-kdat" value="${e ? e.datum : heute}"></div>
+    <div class="field"><label>Schüler</label>
+      <select id="m-ksid"><option value="" ${e && !e.sid?'selected':''}>— gesamte Klasse —</option>${opts}</select>
+    </div>
+    <div class="field"><label>Kommentar</label>
+      <textarea id="m-ktext" rows="4" style="width:100%;padding:8px 10px;border:1.5px solid #e0e0e0;border-radius:6px;font-size:14px;font-family:inherit;resize:vertical">${e ? esc(e.text) : ''}</textarea>
+    </div>
+    <div class="mbtns">
+      <button class="btn btn-gray" onclick="closeModal()">Abbrechen</button>
+      <button class="btn btn-blue" onclick="doSaveKommentar(${e ? `'${e.id}'` : 'null'})">Speichern</button>
+    </div>`);
+  setTimeout(() => { const t = document.getElementById('m-ktext'); if (t) t.focus(); }, 80);
+}
+
+function doSaveKommentar(id) {
+  const k = cls(); if (!k) return;
+  const datum = document.getElementById('m-kdat').value;
+  const sid   = document.getElementById('m-ksid').value || null;
+  const text  = document.getElementById('m-ktext').value.trim();
+  if (!datum) { alert('Bitte ein Datum angeben.'); return; }
+  if (!text)  { alert('Der Kommentar darf nicht leer sein.'); return; }
+  if (id) {
+    const e = k.kommentare.find(x => x.id === id);
+    if (e) { e.datum = datum; e.sid = sid; e.text = text; }
+  } else {
+    k.kommentare.push({ id: 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2,6), datum, sid, text });
+  }
+  save(); renderNotizen(k); closeModal();
+}
+
+function deleteKommentar(id) {
+  const k = cls(); if (!k) return;
+  const e = k.kommentare.find(x => x.id === id); if (!e) return;
+  if (!confirm(`Kommentar vom ${fmtDate(e.datum)} löschen?`)) return;
+  k.kommentare = k.kommentare.filter(x => x.id !== id);
+  save(); renderNotizen(k);
+}
+
+// ── Material / Hausaufgaben ────────────────
+// Zählt reine Dokumentation – fließt bewusst NICHT in die Notenberechnung ein.
+function matCount(k, sid) {
+  const eintraege = Object.values(k.material[sid] || {});
+  return {
+    h: eintraege.filter(v => v === 'H' || v === 'HM').length,
+    m: eintraege.filter(v => v === 'M' || v === 'HM').length
+  };
+}
+
+function renderMaterial(k, wrap) {
+  if (!k.termine.length) { wrap.innerHTML = emptyHtml('Keine Termine', 'Unterrichtstermine über "+ Termin" im Anwesenheit-Tab hinzufügen.'); return; }
+  const sorted = [...k.termine].sort((a,b) => a.datum.localeCompare(b.datum));
+
+  let h = '<div class="tbl-wrap"><table><thead><tr><th class="col-name" style="min-width:230px">Name <span style="font-weight:400;color:#5c6bc0">(Σ 📕 Hausaufg. · 🎒 Material)</span></th>';
+  sorted.forEach(t => {
+    let colSel = '';
+    if (matSelMode) {
+      const all = k.schueler.length > 0 && k.schueler.every(s => matSel.has(s.id + '|' + t.datum));
+      colSel = `<input type="checkbox" ${all?'checked':''} title="Ganze Stunde auswählen" style="vertical-align:middle;margin-right:3px" onclick="event.stopPropagation();toggleMatColumn('${t.datum}')">`;
+    }
+    h += `<th style="min-width:64px"><div>${colSel}${fmtDate(t.datum)}</div>
+      <div style="font-size:10px;font-weight:400;color:#5c6bc0;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="${esc(t.thema)}">${esc(t.thema)}</div></th>`;
+  });
+  h += '</tr></thead><tbody>';
+
+  k.schueler.forEach((s, i) => {
+    // Summe steht in der fixierten Namensspalte, damit sie auch bei vielen Terminen sichtbar bleibt
+    const c = matCount(k, s.id);
+    const warn = (c.h >= 3 || c.m >= 3);
+    const badge = (c.h || c.m)
+      ? `<span style="float:right;font-size:11px;white-space:nowrap;${warn?'color:#c62828;font-weight:700':'color:#888'}"
+           title="${warn?'Schwelle von 3× erreicht – Elternbrief erwägen':'Hausaufgaben / Material vergessen'}">${c.h}📕 ${c.m}🎒</span>`
+      : '';
+    h += `<tr><td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}${badge}</td>`;
+    sorted.forEach(t => {
+      const v = (k.material[s.id] || {})[t.datum] || '';
+      const cfg = MAT_CFG[v];
+      const inhalt = cfg
+        ? `<span title="${cfg.title}" style="font-size:13px">${cfg.label}</span>`
+        : '<span style="color:#ddd">–</span>';
+      if (matSelMode) {
+        const checked = matSel.has(s.id + '|' + t.datum);
+        h += `<td class="cell-st" style="${checked?'background:#c5cae9':''}" onclick="toggleMatCell('${s.id}','${t.datum}')">
+          <input type="checkbox" ${checked?'checked':''} style="pointer-events:none;vertical-align:middle;margin-right:2px">${inhalt}</td>`;
+      } else {
+        h += `<td class="cell-st" style="${cfg?`background:${cfg.bg}`:''}" onclick="showMaterialPopup(event,'${s.id}','${t.datum}')">${inhalt}</td>`;
+      }
+    });
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+  wrap.innerHTML = h;
+}
+
+function showMaterialPopup(ev, sid, datum) {
+  ev.stopPropagation();
+  closePopup();
+  const p = document.createElement('div');
+  p.className = 'popup';
+  const r = ev.currentTarget.getBoundingClientRect();
+  p.style.top  = Math.min(r.bottom + 4, window.innerHeight - 160) + 'px';
+  p.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 210)) + 'px';
+  [['H','📕  Hausaufgaben vergessen'],['M','🎒  Material vergessen'],['HM','📕🎒  Beides vergessen'],['','×  Leer']].forEach(([v,label]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.background = v ? (MAT_CFG[v] ? MAT_CFG[v].bg : '#f5f5f5') : '#f5f5f5';
+    b.style.color = v && MAT_CFG[v] ? MAT_CFG[v].fg : '#999';
+    b.onclick = e2 => { e2.stopPropagation(); setMaterial(sid, datum, v); closePopup(); };
+    p.appendChild(b);
+  });
+  document.body.appendChild(p);
+  _popup = p;
+  setTimeout(() => document.addEventListener('click', closePopup, {once:true}), 0);
+}
+
+function setMaterial(sid, datum, v) {
+  const k = cls(); if (!k) return;
+  if (!k.material[sid]) k.material[sid] = {};
+  if (v) k.material[sid][datum] = v; else delete k.material[sid][datum];
+  save(); renderNotizen(k);
+}
+
+function toggleMatSelMode() {
+  matSelMode = !matSelMode;
+  if (!matSelMode) matSel.clear();
+  const btn = document.getElementById('mat-selbtn');
+  if (btn) {
+    btn.textContent = matSelMode ? '✕ Auswahl beenden' : '☑ Mehrfachauswahl';
+    btn.className = matSelMode ? 'btn btn-blue' : 'btn btn-gray';
+  }
+  updateMatSelBar(); renderNotizen(cls());
+}
+
+function toggleMatCell(sid, datum) {
+  const key = sid + '|' + datum;
+  if (matSel.has(key)) matSel.delete(key); else matSel.add(key);
+  updateMatSelBar(); renderNotizen(cls());
+}
+
+function toggleMatColumn(datum) {
+  const k = cls(); if (!k) return;
+  const all = k.schueler.length > 0 && k.schueler.every(s => matSel.has(s.id + '|' + datum));
+  k.schueler.forEach(s => {
+    const key = s.id + '|' + datum;
+    if (all) matSel.delete(key); else matSel.add(key);
+  });
+  updateMatSelBar(); renderNotizen(k);
+}
+
+function selectAllMatCells() {
+  const k = cls(); if (!k) return;
+  const total = k.schueler.length * k.termine.length;
+  const allSelected = total > 0 && matSel.size >= total;
+  matSel.clear();
+  if (!allSelected) k.schueler.forEach(s => k.termine.forEach(t => matSel.add(s.id + '|' + t.datum)));
+  updateMatSelBar(); renderNotizen(k);
+}
+
+function clearMatSel() { matSel.clear(); updateMatSelBar(); renderNotizen(cls()); }
+
+function updateMatSelBar() {
+  const bar = document.getElementById('nz-selbar');
+  const cnt = document.getElementById('nz-selcount');
+  if (!bar || !cnt) return;
+  bar.style.display = (matSelMode && nzView === 'mat') ? 'flex' : 'none';
+  cnt.textContent = matSel.size + ' ausgewählt';
+}
+
+function applyMaterial(v) {
+  const k = cls(); if (!k || !matSel.size) return;
+  matSel.forEach(key => {
+    const idx = key.indexOf('|');
+    const sid = key.slice(0, idx), datum = key.slice(idx + 1);
+    if (!k.material[sid]) k.material[sid] = {};
+    if (v) k.material[sid][datum] = v; else delete k.material[sid][datum];
+  });
+  matSel.clear();
+  save(); updateMatSelBar(); renderNotizen(k);
+}
+
+// ══════════════════════════════════════════
 // GRUPPENARBEITSGENERATOR
 // ══════════════════════════════════════════
 function renderGruppen(k) {
@@ -1291,11 +1648,26 @@ function renderGruppen(k) {
     `<option value="${t.datum}" ${t.datum===grState.datum?'selected':''}>${fmtDate(t.datum)}${t.thema?' – '+esc(t.thema):''}</option>`
   ).join('');
 
+  // Vorschau, wie die Einteilung mit den aktuellen Einstellungen ausfallen würde
+  const nVorschau = grAnzahlGruppen(poolSize);
+  const basis = nVorschau ? Math.floor(poolSize / nVorschau) : 0;
+  const rest  = nVorschau ? poolSize % nVorschau : 0;
+  const vorschau = nVorschau
+    ? (rest === 0 ? `${nVorschau} Gruppen à ${basis}` : `${rest}× ${basis+1} und ${nVorschau-rest}× ${basis}`)
+    : '–';
+
   let h = `<div class="card" style="margin-bottom:14px">
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-      <label style="font-size:12.5px;color:#555">Anzahl Gruppen
-        <input type="number" min="2" max="${Math.max(2,k.schueler.length)}" value="${grState.n}" class="ns-inp" style="width:50px;margin-left:5px" onchange="grSetN(this.value)">
+      <label style="font-size:12.5px;color:#555">
+        <select style="font-size:12px;padding:3px 5px" onchange="grSetModus(this.value)">
+          <option value="anzahl"  ${grState.modus==='anzahl'?'selected':''}>Anzahl Gruppen</option>
+          <option value="groesse" ${grState.modus==='groesse'?'selected':''}>Schüler pro Gruppe</option>
+        </select>
+        ${grState.modus==='groesse'
+          ? `<input type="number" min="2" max="${Math.max(2,k.schueler.length)}" value="${grState.groesse}" class="ns-inp" style="width:50px;margin-left:5px" onchange="grSetGroesse(this.value)">`
+          : `<input type="number" min="2" max="${Math.max(2,k.schueler.length)}" value="${grState.n}" class="ns-inp" style="width:50px;margin-left:5px" onchange="grSetN(this.value)">`}
       </label>
+      <span style="font-size:12px;color:#3949ab" title="Übrige Schüler werden auf die Gruppen verteilt, statt eine Restgruppe zu bilden">→ ${vorschau}</span>
       <label style="font-size:12.5px;color:#555">
         <input type="checkbox" ${grState.filterAbwesend?'checked':''} onchange="grSetFilter(this.checked)">
         Fehlende ausschließen (Stand:
@@ -1335,7 +1707,21 @@ function renderGruppen(k) {
   wrap.innerHTML = h;
 }
 
-function grSetN(v) { grState.n = Math.max(2, parseInt(v) || 2); }
+// Wie viele Gruppen ergeben sich aus den aktuellen Einstellungen?
+// Im Größen-Modus wird abgerundet, damit die Übrigen auf die Gruppen verteilt werden
+// (25 Schüler à 4 ⇒ 6 Gruppen: 1× 5er … statt 6× 4er plus Einzelkämpfer).
+function grAnzahlGruppen(poolSize) {
+  if (poolSize < 2) return 0;
+  if (grState.modus === 'groesse') {
+    const g = Math.max(2, grState.groesse || 2);
+    return Math.max(1, Math.min(poolSize, Math.floor(poolSize / g)));
+  }
+  return Math.max(1, Math.min(grState.n, poolSize));
+}
+
+function grSetN(v) { grState.n = Math.max(2, parseInt(v) || 2); renderGruppen(cls()); }
+function grSetGroesse(v) { grState.groesse = Math.max(2, parseInt(v) || 2); renderGruppen(cls()); }
+function grSetModus(v) { grState.modus = v === 'groesse' ? 'groesse' : 'anzahl'; renderGruppen(cls()); }
 function grSetFilter(v) { grState.filterAbwesend = v; renderGruppen(cls()); }
 function grSetDatum(v) { grState.datum = v; renderGruppen(cls()); }
 
@@ -1353,7 +1739,7 @@ function wuerfelGruppen() {
     const j = Math.floor(Math.random() * (i + 1));
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
-  const n = Math.min(grState.n, pool.length);
+  const n = grAnzahlGruppen(pool.length);
   const groups = Array.from({length: n}, () => []);
   pool.forEach((sid, idx) => groups[idx % n].push(sid));
   groups.forEach(g => { g.sprecher = g[Math.floor(Math.random() * g.length)]; });
@@ -1446,23 +1832,43 @@ function doAddTerminMore() { doAddTermin(true); }
 function openGewichtungModal() {
   const k = cls(); if (!k) return;
   showModal(`<h2>Notengewichtung</h2>
-    <div class="field"><label>Mitarbeit (mündlich + Kursarbeit) (%)</label>
+    <div class="field"><label>Mitarbeit gesamt (%)</label>
       <input type="number" id="m-mg" value="${k.gewichtung.m}" min="0" max="100"
-        oninput="document.getElementById('m-ag').value=100-parseInt(this.value||0)">
+        oninput="document.getElementById('m-ag').value=100-parseInt(this.value||0);gwPreview()">
     </div>
-    <div class="field"><label>Klassenarbeiten (% – automatisch)</label>
+    <div class="field"><label>Klassenarbeiten / Klausuren (% – automatisch)</label>
       <input type="number" id="m-ag" value="${k.gewichtung.a}" disabled style="background:#f5f5f5;color:#888">
     </div>
+    <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
+    <div class="field"><label>Davon Tests – Anteil <em>innerhalb</em> der Mitarbeit (%)</label>
+      <input type="number" id="m-tg" value="${k.gewichtung.t||0}" min="0" max="100" oninput="gwPreview()">
+    </div>
+    <p class="info-txt" id="gw-preview"></p>
+    <p class="info-txt" style="color:#888">Ohne eingetragene Tests bleibt die Note unverändert – der Anteil greift erst, sobald ein Test vorliegt.</p>
     <div class="mbtns">
       <button class="btn btn-gray" onclick="closeModal()">Abbrechen</button>
       <button class="btn btn-blue" onclick="doSaveGewichtung()">Speichern</button>
     </div>`);
+  gwPreview();
 }
+
+// Zeigt live, was die eingestellten Anteile für die Gesamtnote bedeuten
+function gwPreview() {
+  const el = document.getElementById('gw-preview'); if (!el) return;
+  const m = parseInt(document.getElementById('m-mg').value) || 0;
+  const t = parseInt(document.getElementById('m-tg').value) || 0;
+  const testGesamt = (m * t / 100);
+  const restGesamt = m - testGesamt;
+  el.innerHTML = `Ergibt für die Gesamtnote: <strong>${restGesamt.toFixed(1)}% mündlich + Kursarbeit</strong>, `
+    + `<strong>${testGesamt.toFixed(1)}% Tests</strong>, <strong>${100-m}% schriftlich</strong>.`;
+}
+
 function doSaveGewichtung() {
   const k = cls(); if (!k) return;
   const m = parseInt(document.getElementById('m-mg').value) || 60;
-  k.gewichtung = {m, a: 100-m};
-  save(); renderNoten(k); closeModal();
+  const t = Math.min(100, Math.max(0, parseInt(document.getElementById('m-tg').value) || 0));
+  k.gewichtung = {m, a: 100-m, t};
+  save(); renderArbeiten(k); renderNoten(k); closeModal();
 }
 
 // ══════════════════════════════════════════
@@ -1987,16 +2393,37 @@ function exportExcel() {
     if (obEx) { const p = Math.round(g); return `${g.toFixed(1)} (${ptsToNoteStr(p)})`; }
     return `${g.toFixed(1)} (${roundNoteGuenstig(g)})`;
   }
-  const noHead = ['Nr.', 'Name', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
+  const noHead = ['Nr.', 'Name', 'Ø Tests HJ1', 'Ø Tests HJ2', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
   const noRows = k.schueler.map((s, i) => {
     const hj1 = hjNote(s.id, 1), hj2 = hjNote(s.id, 2);
-    const row = [i+1, `${s.nachname}, ${s.vorname}`, fmtExportNote(hj1), fmtExportNote(hj2)];
+    const row = [i+1, `${s.nachname}, ${s.vorname}`,
+      fmtExportNote(testAvgGrade(s.id, 1)), fmtExportNote(testAvgGrade(s.id, 2)),
+      fmtExportNote(hj1), fmtExportNote(hj2)];
     if (!obEx) row.push(fmtExportNote(jahresnote(s.id)));
     return row;
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([noHead,...noRows]), uniqueSheetName(wb, 'Notenübersicht'));
 
-  // Klassenarbeiten
+  // Material / Hausaufgaben (reine Dokumentation)
+  const matHead = ['Nr.', 'Name', ...sorted.map(t=>fmtDate(t.datum)), 'Σ Hausaufgaben', 'Σ Material'];
+  const matRows = k.schueler.map((s, i) => {
+    const cells = sorted.map(t => ({H:'Hausaufgaben', M:'Material', HM:'Hausaufgaben + Material'}[(k.material[s.id]||{})[t.datum]] || ''));
+    const c = matCount(k, s.id);
+    return [i+1, `${s.nachname}, ${s.vorname}`, ...cells, c.h, c.m];
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([matHead,...matRows]), uniqueSheetName(wb, 'Material-Hausaufgaben'));
+
+  // Kommentar-Logbuch
+  const komHead = ['Datum', 'Schüler', 'Kommentar'];
+  const komRows = [...k.kommentare]
+    .sort((a,b) => (a.datum||'').localeCompare(b.datum||''))
+    .map(e => {
+      const s = e.sid ? k.schueler.find(x => x.id === e.sid) : null;
+      return [e.datum, s ? `${s.nachname}, ${s.vorname}` : 'gesamte Klasse', e.text];
+    });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([komHead,...komRows]), uniqueSheetName(wb, 'Kommentare'));
+
+  // Klassenarbeiten und Tests
   k.arbeiten.forEach(arb => {
     const maxT = arb.aufgaben.reduce((s,a)=>s+(parseFloat(a.punkte)||0),0);
     const head = ['Nr.', 'Name', ...arb.aufgaben.map(a=>`${a.name} (${a.punkte}P)`), 'Gesamt', '%', 'Note'];
