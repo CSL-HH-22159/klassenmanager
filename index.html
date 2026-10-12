@@ -239,6 +239,60 @@ const SM_LABELS = ['Ungenügend (6)','Mangelhaft (5)','Ausreichend (4)','Befried
 const SM_GRADES = [6, 5, 4, 3, 2, 1];
 const SM_COLORS = ['#880e4f','#c62828','#e65100','#f9a825','#388e3c','#1b5e20'];
 
+// Tendenznoten (Sek I, optional pro Klasse): 15 Stufen von 1 bis 6.
+// Kein 1+ und kein 6+/6-, deshalb 14 Prozentgrenzen – alles darunter ist eine 6.
+const TEND_LABELS = ['1','1-','2+','2','2-','3+','3','3-','4+','4','4-','5+','5','5-','6'];
+const TEND_WERTE  = [1, 4/3, 5/3, 2, 7/3, 8/3, 3, 10/3, 11/3, 4, 13/3, 14/3, 5, 16/3, 6];
+const TEND_THRESHOLDS = [95,90,85,80,75,70,65,60,55,50,45,40,35,30]; // für 1 … 5-
+
+function istTendenz(k) { return !!(k && k.notenModus === 'tendenz' && !isOberstufe(k.name)); }
+
+// Dezimalwert -> nächstgelegene Tendenznote ("2-", "3+", …)
+function tendLabel(v) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  let best = 0, diff = Infinity;
+  TEND_WERTE.forEach((w, i) => { const d = Math.abs(w - v); if (d < diff) { diff = d; best = i; } });
+  return TEND_LABELS[best];
+}
+
+// Prozentwert -> Tendenznote als Dezimalwert (damit Durchschnitte sauber weiterrechnen)
+function pctToTend(pct, ns) {
+  const t = (Array.isArray(ns) && ns.length === 14) ? ns : TEND_THRESHOLDS;
+  for (let i = 0; i < t.length; i++) { if (pct >= t[i]) return TEND_WERTE[i]; }
+  return 6;
+}
+
+// Aus 5 Hauptgrenzen 14 Tendenzgrenzen ableiten: jede Notenstufe wird gedrittelt,
+// die 1 (nach oben offen bis 100%) in zwei Stufen geteilt.
+function tendAusFuenf(ns5) {
+  const n = (Array.isArray(ns5) && ns5.length === 5) ? ns5.map(Number) : [90,75,60,45,30];
+  const [g1,g2,g3,g4,g5] = n;
+  const r = v => Math.max(0, Math.min(100, Math.round(v)));
+  const drittel = (unten, oben) => { const s = (oben - unten) / 3; return [r(unten + 2*s), r(unten + s), r(unten)]; };
+  return [
+    r(g1 + (100 - g1) / 2), r(g1),      // 1, 1-
+    ...drittel(g2, g1),                  // 2+, 2, 2-
+    ...drittel(g3, g2),                  // 3+, 3, 3-
+    ...drittel(g4, g3),                  // 4+, 4, 4-
+    ...drittel(g5, g4)                   // 5+, 5, 5-
+  ];
+}
+
+// Liefert den passenden Notenschlüssel für den aktuellen Modus. Ganze Noten (5 Grenzen) und
+// Tendenznoten (14 Grenzen) werden getrennt gespeichert, damit ein Moduswechsel nichts überschreibt.
+function arbSchluessel(k, arb) {
+  if (isOberstufe(k.name)) {
+    if (!Array.isArray(arb.notenschluessel) || arb.notenschluessel.length !== 15) arb.notenschluessel = [...OB_THRESHOLDS];
+    return arb.notenschluessel;
+  }
+  if (istTendenz(k)) {
+    if (!Array.isArray(arb.nsTendenz) || arb.nsTendenz.length !== 14) arb.nsTendenz = tendAusFuenf(arb.notenschluessel);
+    return arb.nsTendenz;
+  }
+  if (!Array.isArray(arb.notenschluessel) || arb.notenschluessel.length !== 5) arb.notenschluessel = [90,75,60,45,30];
+  return arb.notenschluessel;
+}
+
 // Oberstufe (Klassen 11/12): Punkte 0–15
 const OB_THRESHOLDS = [95,90,85,80,75,70,65,60,55,50,45,40,33,27,20]; // Punkte 15→1
 const OB_SMILEY_PTS = [0, 2, 5, 8, 11, 14]; // Smiley-Index → Punkte (Oberstufe)
@@ -365,6 +419,8 @@ function cls() {
     // Test-Anteil INNERHALB der Mitarbeitsnote (Standard 5% der mündlichen Note = 3% der
     // Gesamtnote). Solange kein Test existiert, bleibt die Note rechnerisch unverändert.
     if (typeof k.gewichtung.t !== 'number') k.gewichtung.t = 5;
+    // Notendarstellung: 'ganz' (1–6, wie bisher) oder 'tendenz' (1, 1-, 2+, …) – Sek I
+    if (k.notenModus !== 'tendenz') k.notenModus = 'ganz';
     // Bestehende Klassenarbeiten sind immer vom Typ 'arbeit' – nur neu angelegte
     // können als 'test' markiert werden. Damit ändert sich für Altdaten nichts.
     k.arbeiten.forEach(a => { if (a.typ !== 'test') a.typ = 'arbeit'; });
@@ -879,7 +935,8 @@ function renderMuendlich(k) {
         h += `<td style="text-align:center"><span class="${ptsColorCls(p)}" style="font-size:1.1rem">${avg.toFixed(1)}<br><small style="font-size:10px">${ptsToNoteStr(p)}</small></span></td>`;
       } else {
         const gi = Math.min(6, Math.max(1, Math.round(avg)));
-        h += `<td style="text-align:center"><span class="g${gi}" style="font-size:1.1rem">${avg.toFixed(1)}</span></td>`;
+        const tendTxt = istTendenz(k) ? `<br><small style="font-size:11px">(${tendLabel(avg)})</small>` : '';
+        h += `<td style="text-align:center"><span class="g${gi}" style="font-size:1.1rem">${avg.toFixed(1)}${tendTxt}</span></td>`;
       }
     } else {
       h += '<td style="text-align:center;color:#bbb">—</td>';
@@ -1036,9 +1093,10 @@ function arbeitGrade(arb, sid) {
   const pct = earned / maxTotal * 100;
   const k = cls();
   if (isOberstufe(k ? k.name : '')) {
-    return pctToPts(pct, arb.notenschluessel);
+    return pctToPts(pct, arbSchluessel(k, arb));
   }
-  const ns = Array.isArray(arb.notenschluessel) ? arb.notenschluessel : [90,75,60,45,30];
+  if (istTendenz(k)) return pctToTend(pct, arbSchluessel(k, arb));
+  const ns = arbSchluessel(k, arb);
   for (let i = 0; i < ns.length; i++) { if (pct >= ns[i]) return i + 1; }
   return 6;
 }
@@ -1097,10 +1155,13 @@ function fmtNoteG(g, ob) {
     const p = Math.round(g);
     return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <small>(${ptsToNoteStr(p)})</small></span>`;
   }
-  return `<span class="g${Math.min(6,Math.max(1,Math.round(g)))}">${g.toFixed(1)}</span>`;
+  const cls6 = Math.min(6, Math.max(1, Math.round(g)));
+  if (istTendenz(cls())) return `<span class="g${cls6}">${g.toFixed(1)} <small>(${tendLabel(g)})</small></span>`;
+  return `<span class="g${cls6}">${g.toFixed(1)}</span>`;
 }
 
-// Für "Endnote"-Zellen (Note HJ1/HJ2, Jahresnote): Dezimalwert + gerundete Zeugnisnote in Klammern
+// Für "Endnote"-Zellen (Note HJ1/HJ2, Jahresnote): Dezimalwert + gerundete Zeugnisnote in Klammern.
+// Bei Tendenznoten zusätzlich die Tendenz – die Zeugnisnote bleibt ganzzahlig.
 function fmtNoteFinal(g, ob) {
   if (g === null) return '<span style="color:#bbb">—</span>';
   if (ob) {
@@ -1108,7 +1169,23 @@ function fmtNoteFinal(g, ob) {
     return `<span class="${ptsColorCls(p)}">${g.toFixed(1)} <strong>(${ptsToNoteStr(p)})</strong></span>`;
   }
   const r = roundNoteGuenstig(g);
+  if (istTendenz(cls())) {
+    return `<span class="g${r}">${g.toFixed(1)} <strong>(${tendLabel(g)})</strong>`
+         + `<br><small style="color:#777;font-weight:400">Zeugnis: ${r}</small></span>`;
+  }
   return `<span class="g${r}">${g.toFixed(1)} <strong>(${r})</strong></span>`;
+}
+
+// Einzelne Arbeitsnote in der Notenübersicht / im Klassenarbeiten-Reiter
+function fmtArbeitNote(g, ob, gross) {
+  if (g === null || g === undefined) return '<span style="color:#bbb">—</span>';
+  const size = gross ? ';font-size:1.1rem' : '';
+  if (ob) return `<span class="${ptsColorCls(g)}" style="${size.slice(1)}">${g}${gross?`<br><small style="font-size:10px">${ptsToNoteStr(g)}</small>`:` <small>(${ptsToNoteStr(g)})</small>`}</span>`;
+  if (istTendenz(cls())) {
+    const c = Math.min(6, Math.max(1, Math.round(g)));
+    return `<span class="g${c}" style="${size.slice(1)}">${tendLabel(g)}</span>`;
+  }
+  return `<span class="g${g}" style="${size.slice(1)}">${g}</span>`;
 }
 
 // 'hj1' | 'hj2' | 'jahr' – startet im Halbjahr, in dem wir uns laut Datum gerade befinden
@@ -1171,11 +1248,11 @@ function renderNoten(k) {
         <td class="col-name"><span style="color:#9fa8da;font-weight:600">${i+1}.</span> ${esc(s.nachname)}, ${esc(s.vorname)}</td>
         <td style="text-align:center">${fmtNoteG(pool, ob)}</td>`;
       if (testHJ.length) {
-        testHJ.forEach(a => h += `<td style="text-align:center">${fmtNoteG(arbeitGrade(a, s.id), ob)}</td>`);
+        testHJ.forEach(a => h += `<td style="text-align:center">${fmtArbeitNote(arbeitGrade(a, s.id), ob)}</td>`);
         h += `<td style="text-align:center;background:#e0f2f1">${fmtNoteG(tAvg, ob)}</td>`;
       }
       h += `<td style="text-align:center">${fmtNoteG(mGes, ob)}</td>`;
-      aGrades.forEach(g => h += `<td style="text-align:center">${fmtNoteG(g, ob)}</td>`);
+      aGrades.forEach(g => h += `<td style="text-align:center">${fmtArbeitNote(g, ob)}</td>`);
       h += `<td style="text-align:center;font-size:1.05rem">${fmtNoteFinal(final, ob)}</td></tr>`;
     });
     h += '</tbody></table>';
@@ -1243,13 +1320,21 @@ function renderArbeiten(k) {
 
   const maxTotal = arb.aufgaben.reduce((s,a) => s+(parseFloat(a.punkte)||0), 0);
   const ob = isOberstufe(k.name);
-  const expectedLen = ob ? 15 : 5;
-  const ns = (Array.isArray(arb.notenschluessel) && arb.notenschluessel.length === expectedLen)
-    ? arb.notenschluessel
-    : ob ? [...OB_THRESHOLDS] : [90,75,60,45,30];
+  const tend = istTendenz(k);
+  const ns = arbSchluessel(k, arb);
 
   let nsBar;
-  if (ob) {
+  if (tend) {
+    // 14 Grenzen für 1 … 5- (alles darunter ist eine 6)
+    nsBar = `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;width:100%">`
+      + ns.map((th, i) => {
+          const c = Math.min(6, Math.max(1, Math.round(TEND_WERTE[i])));
+          return `<span class="g${c}" style="display:flex;align-items:center;gap:2px;font-size:11px;white-space:nowrap">
+            <b>${TEND_LABELS[i]}</b> ab<input class="ns-inp" type="number" min="0" max="100" value="${th}" onchange="updateNS(${ai},${i},this.value)">%
+          </span>`;
+        }).join('')
+      + `<span class="g6" style="display:flex;align-items:center;font-size:11px"><b>6</b> darunter</span></div>`;
+  } else if (ob) {
     nsBar = `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;width:100%">`
       + ns.map((th, i) => {
           const pts = 15 - i;
@@ -1313,10 +1398,7 @@ function renderArbeiten(k) {
     });
     const pct = maxTotal ? (earned/maxTotal*100).toFixed(1) : '—';
     const g   = arbeitGrade(arb, sid);
-    const gHtml = g !== null
-      ? (ob ? `<span class="${ptsColorCls(g)}" style="font-size:1.1rem">${g}<br><small style="font-size:10px">${ptsToNoteStr(g)}</small></span>`
-            : `<span class="g${g}" style="font-size:1.1rem">${g}</span>`)
-      : '—';
+    const gHtml = fmtArbeitNote(g, ob, true);
     h += `<td></td>
       <td style="text-align:center;font-size:12px" id="tot-${ai}-${sid}">${earned}/${maxTotal}<br><span style="color:#888">${pct}%</span></td>
       <td style="text-align:center" id="grd-${ai}-${sid}">${gHtml}</td>
@@ -1333,7 +1415,9 @@ function renderArbeiten(k) {
     },0) / k.schueler.length;
     h += `<td style="text-align:center;color:#555">${colAvg.toFixed(1)}</td>`;
   });
-  const avgLabel = (ob && avgG !== '—') ? ` (${ptsToNoteStr(parseFloat(avgG))})` : '';
+  const avgLabel = avgG === '—' ? ''
+    : ob    ? ` (${ptsToNoteStr(parseFloat(avgG))})`
+    : tend  ? ` (${tendLabel(parseFloat(avgG))})` : '';
   h += `<td></td><td style="text-align:center"></td><td style="text-align:center">⌀ ${avgG}${avgLabel}</td></tr>`;
   h += '</tbody></table></div></div>';
   body.innerHTML = h;
@@ -1355,10 +1439,7 @@ function setErgebnis(ai, sid, oi, val) {
   const gc = document.getElementById(`grd-${ai}-${sid}`);
   const ob2 = isOberstufe(k ? k.name : '');
   if (tc) tc.innerHTML = `${earn}/${maxT}<br><span style="color:#888">${pct}%</span>`;
-  if (gc) gc.innerHTML = g !== null
-    ? (ob2 ? `<span class="${ptsColorCls(g)}" style="font-size:1.1rem">${g}<br><small style="font-size:10px">${ptsToNoteStr(g)}</small></span>`
-           : `<span class="g${g}" style="font-size:1.1rem">${g}</span>`)
-    : '—';
+  if (gc) gc.innerHTML = fmtArbeitNote(g, ob2, true);
   renderNoten(k);
 }
 
@@ -1391,11 +1472,9 @@ function arbAufgName(ai,oi,v)    { const k=cls();if(!k)return;k.arbeiten[ai].auf
 function arbAufgPunkte(ai,oi,v)  { const k=cls();if(!k)return;k.arbeiten[ai].aufgaben[oi].punkte=parseFloat(v)||0;save();renderArbeiten(k);renderNoten(k); }
 function updateNS(ai, idx, v) {
   const k=cls();if(!k)return;
-  const arb=k.arbeiten[ai];
-  const ob=isOberstufe(k.name);
-  if(!Array.isArray(arb.notenschluessel)||arb.notenschluessel.length!==(ob?15:5))
-    arb.notenschluessel = ob ? [...OB_THRESHOLDS] : [90,75,60,45,30];
-  arb.notenschluessel[idx]=parseFloat(v)||0;
+  // schreibt in den Schlüssel des aktuellen Modus (ganz / Tendenz / Oberstufe)
+  const ns = arbSchluessel(k, k.arbeiten[ai]);
+  ns[idx] = parseFloat(v) || 0;
   save();renderArbeiten(k);renderNoten(k);
 }
 
@@ -1867,7 +1946,20 @@ function doAddTerminMore() { doAddTermin(true); }
 
 function openGewichtungModal() {
   const k = cls(); if (!k) return;
-  showModal(`<h2>Notengewichtung</h2>
+  const ob = isOberstufe(k.name);
+  const notenDarstellung = ob ? '' : `
+    <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
+    <div class="field"><label>Notendarstellung</label>
+      <select id="m-nmod">
+        <option value="ganz"    ${k.notenModus!=='tendenz'?'selected':''}>Ganze Noten (1 – 6)</option>
+        <option value="tendenz" ${k.notenModus==='tendenz'?'selected':''}>Tendenznoten (1, 1-, 2+, 2, …, 6)</option>
+      </select>
+    </div>
+    <p class="info-txt" style="color:#888">Tendenznoten verfeinern nur die Darstellung der Durchschnitte und den Notenschlüssel
+      der Arbeiten – die Smiley-Eingabe bleibt unverändert. Beim Umstellen bekommen vorhandene Arbeiten einen
+      Schlüssel mit 14 Grenzen, abgeleitet aus ihren bisherigen fünf; dadurch können sich einzelne Arbeitsnoten
+      um eine Tendenzstufe verschieben. Zurückschalten stellt den alten Schlüssel wieder her.</p>`;
+  showModal(`<h2>Notengewichtung</h2>${notenDarstellung ? '' : ''}
     <div class="field"><label>Mitarbeit gesamt (%)</label>
       <input type="number" id="m-mg" value="${k.gewichtung.m}" min="0" max="100"
         oninput="document.getElementById('m-ag').value=100-parseInt(this.value||0);gwPreview()">
@@ -1881,6 +1973,7 @@ function openGewichtungModal() {
     </div>
     <p class="info-txt" id="gw-preview"></p>
     <p class="info-txt" style="color:#888">Ohne eingetragene Tests bleibt die Note unverändert – der Anteil greift erst, sobald ein Test vorliegt.</p>
+    ${notenDarstellung}
     <div class="mbtns">
       <button class="btn btn-gray" onclick="closeModal()">Abbrechen</button>
       <button class="btn btn-blue" onclick="doSaveGewichtung()">Speichern</button>
@@ -1904,7 +1997,9 @@ function doSaveGewichtung() {
   const m = parseInt(document.getElementById('m-mg').value) || 60;
   const t = Math.min(100, Math.max(0, parseInt(document.getElementById('m-tg').value) || 0));
   k.gewichtung = {m, a: 100-m, t};
-  save(); renderArbeiten(k); renderNoten(k); closeModal();
+  const nmod = document.getElementById('m-nmod');
+  if (nmod) k.notenModus = nmod.value === 'tendenz' ? 'tendenz' : 'ganz';
+  save(); renderAll(); closeModal();
 }
 
 // ══════════════════════════════════════════
@@ -2431,9 +2526,11 @@ function exportExcel() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([kaHead,...kaRows]), uniqueSheetName(wb, 'Kursarbeit'));
 
   // Notenübersicht (Halbjahresnoten + Jahresnote)
+  const tendEx = istTendenz(k);
   function fmtExportNote(g) {
     if (g === null) return '';
     if (obEx) { const p = Math.round(g); return `${g.toFixed(1)} (${ptsToNoteStr(p)})`; }
+    if (tendEx) return `${g.toFixed(1)} (${tendLabel(g)}) – Zeugnis ${roundNoteGuenstig(g)}`;
     return `${g.toFixed(1)} (${roundNoteGuenstig(g)})`;
   }
   const noHead = ['Nr.', 'Name', 'Ø Tests HJ1', 'Ø Tests HJ2', 'Note 1. Halbjahr', 'Note 2. Halbjahr', ...(obEx ? [] : ['Jahresnote'])];
@@ -2474,7 +2571,9 @@ function exportExcel() {
       const ergs  = arb.ergebnisse[s.id]||[];
       const earn  = ergs.reduce((s,p)=>s+(parseFloat(p)||0),0);
       const pct   = maxT ? (earn/maxT*100).toFixed(1) : '';
-      return [i+1, `${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, arbeitGrade(arb,s.id)||''];
+      const gA = arbeitGrade(arb, s.id);
+      const gTxt = gA === null ? '' : (tendEx ? tendLabel(gA) : gA);
+      return [i+1, `${s.nachname}, ${s.vorname}`, ...arb.aufgaben.map((_,oi)=>ergs[oi]!==undefined?ergs[oi]:''), `${earn}/${maxT}`, pct, gTxt];
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...rows]), uniqueSheetName(wb, arb.name));
   });
